@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -236,9 +237,15 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
+	src := source.String()
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
-		h.sessions.Bind(userName, source.String())
+		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
+			h.logger.InfoContext(ctx, "[", userName, "] device limit reached, rejecting connection from ", src)
+			usersession.Reject(conn, onClose)
+			return
+		}
+		onClose = h.sessions.TrackClose(src, onClose)
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
@@ -262,9 +269,15 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
+	src := source.String()
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
-		h.sessions.Bind(userName, source.String())
+		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
+			h.logger.InfoContext(ctx, "[", userName, "] device limit reached, rejecting packet connection from ", src)
+			usersession.Reject(conn, onClose)
+			return
+		}
+		onClose = h.sessions.TrackClose(src, onClose)
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)

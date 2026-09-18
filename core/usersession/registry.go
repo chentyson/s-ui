@@ -46,6 +46,10 @@ type entry struct {
 	user     string
 	lastSeen time.Time
 	closer   io.Closer
+	// refs is the number of live sub-connections bound to this source. A
+	// source counts as an active device while refs > 0; it is released back to
+	// the pool (and out of the per-user index) once the last one closes.
+	refs int
 }
 
 // block mutes one client address. A removal keeps it muted until the backstop;
@@ -58,17 +62,22 @@ type block struct {
 }
 
 // Registry maps a client address to the user it authenticated as. One instance
-// per inbound.
+// per inbound. userSources is the reverse index (user -> active sources) that
+// backs per-user device counting.
 type Registry struct {
 	access  sync.Mutex
 	sources map[string]*entry
 	blocked map[string]*block
+	// userSources maps a user to the set of sources currently active for that
+	// user. It is maintained alongside sources and is what CountForUser reads.
+	userSources map[string]map[string]struct{}
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		sources: make(map[string]*entry),
-		blocked: make(map[string]*block),
+		sources:     make(map[string]*entry),
+		blocked:     make(map[string]*block),
+		userSources: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -113,6 +122,93 @@ func (r *Registry) Untrack(source string) {
 	}
 	r.access.Lock()
 	defer r.access.Unlock()
+	if e, ok := r.sources[source]; ok && e.refs > 0 {
+		// Refcounted sub-connection (QUIC protocols): release one reference and
+		// only drop the source once the last one has closed.
+		e.refs--
+		if e.refs == 0 {
+			r.removeSourceLocked(source)
+		}
+		return
+	}
+	r.removeSourceLocked(source)
+}
+
+// TryBind records which user the session at source authenticated as and, if the
+// user is within their device limit, marks the source as an active device. It
+// returns false (without binding) when the user already has limit distinct
+// active sources, so the caller can reject the connection before it is routed.
+// A source that is already active for the same user just bumps its refcount and
+// is always allowed. limit <= 0 means "no limit".
+func (r *Registry) TryBind(user string, source string, limit int) bool {
+	if source == "" || user == "" {
+		return true
+	}
+	r.access.Lock()
+	defer r.access.Unlock()
+	e := r.load(source)
+	if e.refs > 0 && e.user == user {
+		e.refs++
+		return true
+	}
+	if limit > 0 {
+		if set, ok := r.userSources[user]; ok && len(set) >= limit {
+			return false
+		}
+	}
+	// The source was active for a different user; release it from that user's
+	// index before reassigning it.
+	if e.user != "" && e.user != user {
+		if set, ok := r.userSources[e.user]; ok {
+			delete(set, source)
+			if len(set) == 0 {
+				delete(r.userSources, e.user)
+			}
+		}
+	}
+	e.user = user
+	e.refs = 1
+	if r.userSources[user] == nil {
+		r.userSources[user] = make(map[string]struct{})
+	}
+	r.userSources[user][source] = struct{}{}
+	return true
+}
+
+// CountForUser returns the number of distinct sources currently active for
+// user. It is the live device count the panel's limit is compared against.
+func (r *Registry) CountForUser(user string) int {
+	if user == "" {
+		return 0
+	}
+	r.access.Lock()
+	defer r.access.Unlock()
+	return len(r.userSources[user])
+}
+
+// TrackClose wraps a close handler so the source's refcount is released when
+// the connection closes. Protocols that refcount sub-connections (the QUIC
+// ones) use this to keep the per-user device count accurate.
+func (r *Registry) TrackClose(source string, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
+	return func(err error) {
+		r.Untrack(source)
+		if onClose != nil {
+			onClose(err)
+		}
+	}
+}
+
+// removeSourceLocked drops a source from the registry and the per-user index.
+// Callers must hold r.access.
+func (r *Registry) removeSourceLocked(source string) {
+	if e, ok := r.sources[source]; ok && e.user != "" {
+		if set, ok := r.userSources[e.user]; ok {
+			delete(set, source)
+			if len(set) == 0 {
+				delete(r.userSources, e.user)
+			}
+		}
+	}
 	delete(r.sources, source)
 	delete(r.blocked, source)
 }
@@ -156,8 +252,7 @@ func (r *Registry) CloseUsers(keep map[string]struct{}) int {
 	cut := 0
 	for source, e := range r.sources {
 		if now.Sub(e.lastSeen) > idleTimeout {
-			delete(r.sources, source)
-			delete(r.blocked, source)
+			r.removeSourceLocked(source)
 			continue
 		}
 		if e.user == "" {
@@ -170,8 +265,7 @@ func (r *Registry) CloseUsers(keep map[string]struct{}) int {
 		cut++
 		if e.closer != nil {
 			closers = append(closers, e.closer)
-			delete(r.sources, source)
-			delete(r.blocked, source)
+			r.removeSourceLocked(source)
 			continue
 		}
 		r.blocked[source] = &block{at: now, lastAttempt: now}
@@ -222,8 +316,7 @@ func (r *Registry) KickUserSessions(user string) int {
 		}
 		kicked++
 		if e.closer != nil {
-			delete(r.sources, source)
-			delete(r.blocked, source)
+			r.removeSourceLocked(source)
 			closers = append(closers, e.closer)
 			continue
 		}

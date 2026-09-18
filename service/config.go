@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alireza0/s-ui/core"
+	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
@@ -101,11 +102,36 @@ func (s *ConfigService) GetConfig(data string) (*[]byte, error) {
 	if err = ensureDefaultHTTPClient(&singboxConfig); err != nil {
 		return nil, err
 	}
+	// Refresh the in-memory per-user device limits so the core's connection
+	// path sees the latest values without a DB hit on every connection.
+	devlimit.Reload(s.loadDeviceLimits())
 	rawConfig, err := json.MarshalIndent(singboxConfig, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return &rawConfig, nil
+}
+
+// loadDeviceLimits reads the per-user device limits from the clients table.
+// The limit lives in the `devs` column (0 or missing means "use the default").
+// It is read with raw SQL so a deployment that has not added the column still
+// builds its config: the query fails, a warning is logged, and every user
+// falls back to devlimit.DefaultLimit.
+func (s *ConfigService) loadDeviceLimits() map[string]int {
+	type devRow struct {
+		Name string
+		Devs int
+	}
+	var rows []devRow
+	if err := database.GetDB().Table("clients").Select("name, devs").Scan(&rows).Error; err != nil {
+		logger.Warning("devlimit: could not load device limits: ", err)
+		return nil
+	}
+	m := make(map[string]int, len(rows))
+	for _, r := range rows {
+		m[r.Name] = r.Devs
+	}
+	return m
 }
 
 // defaultHTTPClientTag names the HTTP client remote rule-sets download over
