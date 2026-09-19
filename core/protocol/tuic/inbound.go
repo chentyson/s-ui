@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -130,6 +131,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		metadata.User = userName
 		h.sessions.Bind(userName, source.String())
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
+		conn = bwlimit.Wrap(userName, conn)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
+
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/common/listener"
@@ -195,6 +197,7 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 			metadata.User = user
 		}
 		h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
+		conn = bwlimit.Wrap(user, conn)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}

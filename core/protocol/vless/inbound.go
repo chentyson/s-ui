@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -177,6 +178,9 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 	if user != "" {
 		metadata.User = user
 	}
+	// A client's group caps its bandwidth; nothing happens for a client
+	// that has no cap.
+	conn = bwlimit.Wrap(user, conn)
 	if metadata.Destination == singmux.Destination {
 		// The multiplex carrier never reaches the session tracker: the mux
 		// router takes it before the real router, and the streams it carries

@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
@@ -246,6 +247,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 			return
 		}
 		onClose = h.sessions.TrackClose(src, onClose)
+		conn = bwlimit.Wrap(userName, conn)
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)

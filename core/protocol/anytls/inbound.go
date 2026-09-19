@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -141,6 +142,7 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
 		h.sessions.Bind(userName, source.String())
+		conn = bwlimit.Wrap(userName, conn)
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)

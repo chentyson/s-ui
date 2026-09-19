@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alireza0/s-ui/core"
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
@@ -105,6 +106,8 @@ func (s *ConfigService) GetConfig(data string) (*[]byte, error) {
 	// Refresh the in-memory per-user device limits so the core's connection
 	// path sees the latest values without a DB hit on every connection.
 	devlimit.Reload(s.loadDeviceLimits())
+	// Same for the bandwidth caps a client's group stands for.
+	bwlimit.Reload(s.loadGroupLimits())
 	rawConfig, err := json.MarshalIndent(singboxConfig, "", "  ")
 	if err != nil {
 		return nil, err
@@ -132,6 +135,50 @@ func (s *ConfigService) loadDeviceLimits() map[string]int {
 		m[r.Name] = r.Devs
 	}
 	return m
+}
+
+// loadGroupLimits reads the bandwidth caps that clients' groups stand for.
+//
+// A group that is set but does not read as a bandwidth is capped at
+// bwlimit.DefaultKbit here, exactly the way a save rewrites it, so a row that
+// predates the feature or was edited by hand is metered rather than let
+// through. The query is raw SQL for the same reason as the device limits: a
+// database the panel cannot read a group out of is a warning, not a failed
+// config build.
+func (s *ConfigService) loadGroupLimits() map[string]bwlimit.Limit {
+	db := database.GetDB()
+	if db == nil {
+		// A config build without a database (tests, early startup) has no
+		// groups to read; nothing is capped.
+		return nil
+	}
+	var rows []struct {
+		Name  string
+		Group string
+	}
+	// "group" is a keyword, hence the quoting.
+	if err := db.Raw(`SELECT name, "group" FROM clients`).Scan(&rows).Error; err != nil {
+		logger.Warning("bwlimit: could not load client groups: ", err)
+		return nil
+	}
+	m := make(map[string]bwlimit.Limit, len(rows))
+	for _, r := range rows {
+		if limit, ok := bwlimit.Group(r.Group); ok {
+			m[r.Name] = limit
+		}
+	}
+	return m
+}
+
+// ReloadGroupLimits refreshes the caps from the database. The core reads them
+// at connection time, so a client edit has to push a fresh table even though a
+// client edit does not restart the core.
+func (s *ConfigService) ReloadGroupLimits() {
+	limits := s.loadGroupLimits()
+	bwlimit.Reload(limits)
+	// One line per save: this is how an operator confirms from the journal that
+	// the caps they set in the panel reached the core.
+	logger.Info("bwlimit: ", len(limits), " client(s) capped by group")
 }
 
 // defaultHTTPClientTag names the HTTP client remote rule-sets download over
@@ -421,6 +468,10 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			logger.Error("failed to commit config save: ", cErr)
 			return
 		}
+		// A client's bandwidth cap lives in its group and is read per
+		// connection, so a save that touched one has to push a fresh table.
+		// Reloading on every save is cheaper than working out which ones did.
+		s.ReloadGroupLimits()
 		if restartWith != nil {
 			// Detached: a restart takes seconds and this is an HTTP handler.
 			// The recover is required -- a panic here is outside gin's reach.

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -196,6 +197,7 @@ func (h *MultiInbound) newConnection(ctx context.Context, conn net.Conn, metadat
 		h.sessions.Bind(user, source)
 		defer h.sessions.Untrack(source)
 	}
+	conn = bwlimit.Wrap(user, conn)
 	if h.tracker != nil {
 		conn = h.tracker.TrackConnection(conn, metadata)
 	}

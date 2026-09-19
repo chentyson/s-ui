@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
@@ -16,6 +17,19 @@ import (
 )
 
 type ClientService struct{}
+
+// normalizeGroup rewrites a client group that does not read as a bandwidth to
+// the default one. The group is what caps a client, so a label that is neither
+// empty nor a bandwidth ("VIP", "special") must not leave the client unmetered:
+// it is capped at the default and stored under that name, which also makes the
+// panel show what it became.
+func normalizeGroup(client *model.Client) {
+	group, changed := bwlimit.CanonicalGroup(client.Group)
+	if changed {
+		logger.Info("bwlimit: client ", client.Name, " group ", client.Group, " is not a bandwidth, storing ", group)
+		client.Group = group
+	}
+}
 
 func (s *ClientService) Get(id string) (*[]model.Client, error) {
 	if id == "" {
@@ -86,6 +100,7 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err = setConfigIdentity(&client); err != nil {
 			return nil, err
 		}
+		normalizeGroup(&client)
 		err = s.updateLinksWithFixedInbounds(tx, []*model.Client{&client}, hostname)
 		if err != nil {
 			return nil, err
@@ -130,6 +145,7 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			if err = setConfigIdentity(client); err != nil {
 				return nil, err
 			}
+			normalizeGroup(client)
 			client.CreatedAt = now
 			var ids []uint
 			if err = json.Unmarshal(client.Inbounds, &ids); err != nil {
@@ -167,6 +183,7 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			if err = setConfigIdentity(client); err != nil {
 				return nil, err
 			}
+			normalizeGroup(client)
 			s.preserveServerOwnedFields(tx, client)
 			if len(changedInboundIds) > 0 {
 				inboundIds = common.UnionUintArray(inboundIds, changedInboundIds)
