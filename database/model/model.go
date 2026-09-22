@@ -41,6 +41,8 @@ type Client struct {
 	Desc     string          `json:"desc" form:"desc"`
 	Group    string          `json:"group" form:"group"`
 	Remark   string          `json:"remark" form:"remark"`
+	Devs     int             `json:"devs" form:"devs" gorm:"default:0;not null"`
+	Email    string          `json:"email" form:"email"`
 
 	// Timestamps (unix seconds): creation time and last time the client had traffic
 	CreatedAt int64 `json:"createdAt" form:"createdAt" gorm:"default:0;not null"`
