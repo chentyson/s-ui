@@ -117,3 +117,21 @@ func (c *Core) KickUserSessions(user string) int {
 	}
 	return kicked
 }
+
+// GetDeviceCounts returns the total active device count per user, aggregated
+// across all inbounds that track user sessions.
+func (c *Core) GetDeviceCounts() map[string]int {
+	box, err := c.running()
+	if err != nil {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, inb := range box.inbound.Inbounds() {
+		if counter, ok := inb.(usersession.DeviceCounter); ok {
+			for user, n := range counter.AllUserCounts() {
+				counts[user] += n
+			}
+		}
+	}
+	return counts
+}

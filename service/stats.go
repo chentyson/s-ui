@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/alireza0/s-ui/core"
+	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/util/common"
@@ -15,9 +16,11 @@ import (
 )
 
 type onlines struct {
-	Inbound  []string `json:"inbound,omitempty"`
-	User     []string `json:"user,omitempty"`
-	Outbound []string `json:"outbound,omitempty"`
+	User           []string         `json:"user"`
+	UserCounts     map[string]int   `json:"userCounts"`
+	RejectionUsers []string         `json:"rejectionUsers"`
+	Inbound        []string         `json:"inbound"`
+	Outbound       []string         `json:"outbound"`
 }
 
 var (
@@ -226,11 +229,19 @@ func (s *StatsService) GetOnlines() (onlines, error) {
 	statsMu.Lock()
 	defer statsMu.Unlock()
 	// Copied: the caller must not hold slices the next cron tick replaces.
-	return onlines{
+	result := onlines{
 		Inbound:  append([]string(nil), onlineResources.Inbound...),
 		User:     append([]string(nil), onlineResources.User...),
 		Outbound: append([]string(nil), onlineResources.Outbound...),
-	}, nil
+	}
+	// Populate live device counts from the core (real-time, not the 10s cache).
+	if corePtr != nil {
+		if counts := corePtr.GetDeviceCounts(); counts != nil {
+			result.UserCounts = counts
+		}
+	}
+	result.RejectionUsers = devlimit.GetRejectionUsers()
+	return result, nil
 }
 
 // GetSessions lists the live routed connections, narrowed to one user, inbound

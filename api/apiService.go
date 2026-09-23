@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/service"
@@ -238,6 +239,12 @@ func (a *ApiService) GetStatus(c *gin.Context) {
 func (a *ApiService) GetOnlines(c *gin.Context) {
 	onlines, err := a.StatsService.GetOnlines()
 	jsonObj(c, onlines, err)
+}
+
+func (a *ApiService) GetRejections(c *gin.Context) {
+	user := c.Query("user")
+	rejections := devlimit.GetRejections(user)
+	jsonObj(c, rejections, nil)
 }
 
 func (a *ApiService) GetSessions(c *gin.Context) {

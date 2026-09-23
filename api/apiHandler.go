@@ -95,6 +95,8 @@ func (a *APIHandler) getHandler(c *gin.Context) {
 		a.ApiService.GetStatus(c)
 	case "onlines":
 		a.ApiService.GetOnlines(c)
+	case "rejections":
+		a.ApiService.GetRejections(c)
 	case "sessions":
 		a.ApiService.GetSessions(c)
 	case "logs":

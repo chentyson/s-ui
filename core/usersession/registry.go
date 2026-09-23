@@ -186,6 +186,27 @@ func (r *Registry) CountForUser(user string) int {
 	return len(r.userSources[user])
 }
 
+// AllUserCounts returns a snapshot of the active device count for every user
+// that currently has at least one bound source.
+func (r *Registry) AllUserCounts() map[string]int {
+	r.access.Lock()
+	defer r.access.Unlock()
+	counts := make(map[string]int, len(r.userSources))
+	for user, sources := range r.userSources {
+		if len(sources) > 0 {
+			counts[user] = len(sources)
+		}
+	}
+	return counts
+}
+
+// DeviceCounter exposes the per-user device count of an inbound's session
+// registry. Inbounds that track user sessions implement this so the panel can
+// aggregate the active device count across all inbounds.
+type DeviceCounter interface {
+	AllUserCounts() map[string]int
+}
+
 // TrackClose wraps a close handler so the source's refcount is released when
 // the connection closes. Protocols that refcount sub-connections (the QUIC
 // ones) use this to keep the per-user device count accurate.

@@ -242,6 +242,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
 		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
+			devlimit.LogRejection(userName, src, devlimit.Get(userName))
 			h.logger.InfoContext(ctx, "[", userName, "] device limit reached, rejecting connection from ", src)
 			usersession.Reject(conn, onClose)
 			return
@@ -275,6 +276,7 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
 		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
+			devlimit.LogRejection(userName, src, devlimit.Get(userName))
 			h.logger.InfoContext(ctx, "[", userName, "] device limit reached, rejecting packet connection from ", src)
 			usersession.Reject(conn, onClose)
 			return

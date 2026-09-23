@@ -42,4 +42,10 @@ func (h *Inbound) KickUserSessions(user string) int {
 	return h.sessions.KickUserSessions(user)
 }
 
+// AllUserCounts returns the active device count per user on this inbound.
+func (h *Inbound) AllUserCounts() map[string]int {
+	return h.sessions.AllUserCounts()
+}
+
 var _ usersession.Closer = (*Inbound)(nil)
+var _ usersession.DeviceCounter = (*Inbound)(nil)
