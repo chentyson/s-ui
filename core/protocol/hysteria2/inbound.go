@@ -299,6 +299,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 			return err
 		}
 	}
+	h.sessions.StartCleanup()
 	packetConn, err := h.listener.ListenUDP()
 	if err != nil {
 		return err
@@ -311,6 +312,7 @@ func (h *Inbound) InterfaceUpdated(ctx context.Context) {
 }
 
 func (h *Inbound) Close() error {
+	h.sessions.StopCleanup()
 	return common.Close(
 		h.listener,
 		h.tlsConfig,

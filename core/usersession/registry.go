@@ -30,6 +30,15 @@ const (
 	// quiet this long, the next attempt from the address is a new session and
 	// is let through, so a disconnect does not turn into a lockout.
 	kickQuietWindow = 30 * time.Second
+	// Periodic cleanup interval: how often the registry scans for stale
+	// sources. UDP-based protocols (hysteria2, TUIC) abandon connections
+	// without a proper close, so the source entry would otherwise linger
+	// until the next CloseUsers call.
+	cleanupInterval = 30 * time.Second
+	// A source not seen for this long is considered stale and removed by the
+	// periodic cleanup. A healthy device opens new connections far more
+	// often than this; a dead one never does.
+	cleanupMaxIdle = 60 * time.Second
 )
 
 // Closer is implemented by the inbounds that own a Registry.
@@ -71,6 +80,9 @@ type Registry struct {
 	// userSources maps a user to the set of sources currently active for that
 	// user. It is maintained alongside sources and is what CountForUser reads.
 	userSources map[string]map[string]struct{}
+	// cleanupStop signals the periodic cleanup goroutine to exit.
+	cleanupStop chan struct{}
+	cleanupOnce sync.Once
 }
 
 func NewRegistry() *Registry {
@@ -79,6 +91,60 @@ func NewRegistry() *Registry {
 		blocked:     make(map[string]*block),
 		userSources: make(map[string]map[string]struct{}),
 	}
+}
+
+// StartCleanup launches a background goroutine that periodically removes
+// stale sources (those not seen for cleanupMaxIdle). This is essential for
+// UDP-based protocols (hysteria2, TUIC) where the client abandons connections
+// without a proper close, leaving orphaned source entries that inflate the
+// device count. Call once after the registry is created; the goroutine exits
+// when StopCleanup is called.
+func (r *Registry) StartCleanup() {
+	r.cleanupOnce.Do(func() {
+		r.cleanupStop = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(cleanupInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-r.cleanupStop:
+					return
+				case <-ticker.C:
+					r.Cleanup(cleanupMaxIdle)
+				}
+			}
+		}()
+	})
+}
+
+// StopCleanup signals the periodic cleanup goroutine to exit. Safe to call
+// multiple times.
+func (r *Registry) StopCleanup() {
+	r.cleanupOnce.Do(func() {
+		// If StartCleanup was never called, cleanupStop is nil; nothing to do.
+	})
+	if r.cleanupStop != nil {
+		close(r.cleanupStop)
+		r.cleanupStop = nil
+	}
+}
+
+// Cleanup removes sources that have not been seen for maxIdle. Returns the
+// number of sources removed. A source with refs > 0 is only removed if it has
+// been idle for maxIdle, which indicates the connections are abandoned (the
+// client stopped sending without closing them).
+func (r *Registry) Cleanup(maxIdle time.Duration) int {
+	now := time.Now()
+	r.access.Lock()
+	defer r.access.Unlock()
+	removed := 0
+	for source, e := range r.sources {
+		if now.Sub(e.lastSeen) > maxIdle {
+			r.removeSourceLocked(source)
+			removed++
+		}
+	}
+	return removed
 }
 
 func (r *Registry) load(source string) *entry {
@@ -268,14 +334,16 @@ func (r *Registry) Allowed(source string) bool {
 func (r *Registry) CloseUsers(keep map[string]struct{}) int {
 	now := time.Now()
 
+	// First pass: drop sources that have been idle long enough to be stale.
+	// This reuses the same logic as the periodic cleanup but with the longer
+	// idleTimeout, since a panel-triggered reconfiguration is a stronger signal
+	// that old sessions are gone.
+	r.Cleanup(idleTimeout)
+
 	r.access.Lock()
 	var closers []io.Closer
 	cut := 0
 	for source, e := range r.sources {
-		if now.Sub(e.lastSeen) > idleTimeout {
-			r.removeSourceLocked(source)
-			continue
-		}
 		if e.user == "" {
 			continue
 		}
