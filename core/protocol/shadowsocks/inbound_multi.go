@@ -37,6 +37,7 @@ var (
 	_ adapter.TCPInjectableInbound = (*MultiInbound)(nil)
 	_ adapter.ManagedSSMServer     = (*MultiInbound)(nil)
 	_ usersession.Closer           = (*MultiInbound)(nil)
+	_ usersession.DeviceCounter    = (*MultiInbound)(nil)
 )
 
 type MultiInbound struct {
@@ -243,6 +244,11 @@ func (h *MultiInbound) CloseUserSessions(keep map[string]struct{}) int {
 // user out: they may connect again immediately.
 func (h *MultiInbound) KickUserSessions(user string) int {
 	return h.sessions.KickUserSessions(user)
+}
+
+// AllUserCounts returns the active device count per user on this inbound.
+func (h *MultiInbound) AllUserCounts() map[string]int {
+	return h.sessions.AllUserCounts()
 }
 
 //nolint:staticcheck

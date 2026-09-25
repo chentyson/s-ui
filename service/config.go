@@ -116,10 +116,10 @@ func (s *ConfigService) GetConfig(data string) (*[]byte, error) {
 }
 
 // loadDeviceLimits reads the per-user device limits from the clients table.
-// The limit lives in the `devs` column (0 or missing means "use the default").
+// The limit lives in the `devs` column (0 means "no limit").
 // It is read with raw SQL so a deployment that has not added the column still
 // builds its config: the query fails, a warning is logged, and every user
-// falls back to devlimit.DefaultLimit.
+// gets no limit.
 func (s *ConfigService) loadDeviceLimits() map[string]int {
 	type devRow struct {
 		Name string
@@ -179,6 +179,20 @@ func (s *ConfigService) ReloadGroupLimits() {
 	// One line per save: this is how an operator confirms from the journal that
 	// the caps they set in the panel reached the core.
 	logger.Info("bwlimit: ", len(limits), " client(s) capped by group")
+}
+
+// ReloadDeviceLimits refreshes the per-user device limits from the database.
+// The core reads them at connection time, so a client edit has to push a fresh
+// table even though a client edit does not restart the core. Without this a
+// devs value changed in the panel would not take effect until the next full
+// config rebuild (startup or config restart), and the core would keep applying
+// the stale limit (or the default) to new connections.
+func (s *ConfigService) ReloadDeviceLimits() {
+	limits := s.loadDeviceLimits()
+	devlimit.Reload(limits)
+	// One line per save: this is how an operator confirms from the journal that
+	// the device limits they set in the panel reached the core.
+	logger.Info("devlimit: ", len(limits), " client(s) with device limits")
 }
 
 // defaultHTTPClientTag names the HTTP client remote rule-sets download over
@@ -472,6 +486,9 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		// connection, so a save that touched one has to push a fresh table.
 		// Reloading on every save is cheaper than working out which ones did.
 		s.ReloadGroupLimits()
+		// Same for the per-user device limits: a devs change in the panel must
+		// reach the core immediately, not wait for the next full config rebuild.
+		s.ReloadDeviceLimits()
 		if restartWith != nil {
 			// Detached: a restart takes seconds and this is an HTTP handler.
 			// The recover is required -- a panic here is outside gin's reach.

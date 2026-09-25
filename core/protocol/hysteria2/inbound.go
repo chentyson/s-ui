@@ -243,8 +243,8 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		metadata.User = userName
 		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
 			devlimit.LogRejection(userName, src, devlimit.Get(userName))
-			h.logger.InfoContext(ctx, "[", userName, "] device limit reached, rejecting connection from ", src)
-			usersession.Reject(conn, onClose)
+			h.logger.ErrorContext(ctx, "[", userName, "] device limit reached, rejecting connection from ", src)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
 			return
 		}
 		onClose = h.sessions.TrackClose(src, onClose)
@@ -277,8 +277,8 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		metadata.User = userName
 		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
 			devlimit.LogRejection(userName, src, devlimit.Get(userName))
-			h.logger.InfoContext(ctx, "[", userName, "] device limit reached, rejecting packet connection from ", src)
-			usersession.Reject(conn, onClose)
+			h.logger.ErrorContext(ctx, "[", userName, "] device limit reached, rejecting packet connection from ", src)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
 			return
 		}
 		onClose = h.sessions.TrackClose(src, onClose)
@@ -317,3 +317,5 @@ func (h *Inbound) Close() error {
 		common.PtrOrNil(h.service),
 	)
 }
+
+

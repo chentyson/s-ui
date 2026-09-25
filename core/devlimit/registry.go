@@ -5,8 +5,8 @@ package devlimit
 
 import "sync"
 
-// DefaultLimit is applied when a user has no explicit limit (devs = 0) or is
-// not present in the registry at all.
+// DefaultLimit is kept for backward compatibility but is no longer used as a
+// fallback. devs = 0 means "no limit".
 const DefaultLimit = 2
 
 var (
@@ -14,8 +14,8 @@ var (
 	limits = make(map[string]int)
 )
 
-// Reload atomically replaces the user -> device-limit map. A limit of 0 (or a
-// missing user) falls back to DefaultLimit at lookup time.
+// Reload atomically replaces the user -> device-limit map. A limit of 0 means
+// "no limit" for that user.
 func Reload(m map[string]int) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -25,13 +25,13 @@ func Reload(m map[string]int) {
 	limits = m
 }
 
-// Get returns the device limit for user, or DefaultLimit when the user is
-// unknown or has no explicit (positive) limit.
+// Get returns the device limit for user. A value of 0 means "no limit".
+// Unknown users also get 0 (no limit).
 func Get(user string) int {
 	mu.RLock()
 	defer mu.RUnlock()
-	if n, ok := limits[user]; ok && n > 0 {
+	if n, ok := limits[user]; ok {
 		return n
 	}
-	return DefaultLimit
+	return 0
 }
