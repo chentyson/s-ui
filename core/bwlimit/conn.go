@@ -49,12 +49,15 @@ func (l *limitedConn) Close() error {
 }
 
 // CloseWrite and CloseRead keep the half-closes the router performs working
-// through the wrapper. Whether they mean anything is up to the wrapped type.
+// through the wrapper. The connection underneath is not required to support
+// them -- the QUIC streams hysteria2/tuic hand us have neither -- and closing
+// the whole stream instead of half-closing it cuts the other direction short,
+// so a half-close the wrapped type does not have stays a no-op.
 func (l *limitedConn) CloseWrite() error {
 	if cw, ok := l.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
-	return l.Conn.Close()
+	return nil
 }
 
 func (l *limitedConn) CloseRead() error {
@@ -62,4 +65,10 @@ func (l *limitedConn) CloseRead() error {
 		return cr.CloseRead()
 	}
 	return nil
+}
+
+// Upstream hands the connection underneath to sing's unwrap helpers, the way
+// every other wrapper in the core does, so wrapping stays invisible to them.
+func (l *limitedConn) Upstream() any {
+	return l.Conn
 }
