@@ -31,7 +31,9 @@ const (
 //	ZY1  连接时设备数限制（devlimit，core/devlimit）
 //	ZY2  每用户带宽限速（bwlimit，按 client.group）+ client devs/email 字段 + 在线设备数/拒绝日志
 //	ZY3  bwlimit 半关闭修复（core/bwlimit/conn.go：QUIC 类协议 stream 被整条关闭 → 官方 hysteria2/tuic 客户端 EOF）
-const VersionSuffix = "ZY3"
+//	ZY4  订阅端口新增查询接口 GET /sub/query?key=*** 按 uuid/password 匹配用户，
+//	     返回到期日/流量限额/当前用量/devs/email/enable（sub/queryService.go）
+const VersionSuffix = "ZY4"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

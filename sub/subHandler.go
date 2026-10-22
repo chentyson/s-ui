@@ -15,6 +15,7 @@ type SubHandler struct {
 	SubService
 	JsonService
 	ClashService
+	QueryService
 }
 
 func NewSubHandler(g *gin.RouterGroup) {
@@ -23,8 +24,17 @@ func NewSubHandler(g *gin.RouterGroup) {
 }
 
 func (s *SubHandler) initRouter(g *gin.RouterGroup) {
+	g.GET("/query", s.query)
 	g.GET("/:subid", s.subs)
 	g.HEAD("/:subid", s.subHeaders)
+}
+
+// query serves the public status endpoint: GET /sub/query?key=***
+// The key is a client uuid or password; the matched client's expiry, traffic
+// limit and current usage are returned as JSON.
+func (s *SubHandler) query(c *gin.Context) {
+	resp := s.QueryService.Query(c.Query("key"))
+	c.JSON(resp.Code, resp)
 }
 
 func (s *SubHandler) subs(c *gin.Context) {
