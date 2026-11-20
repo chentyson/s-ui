@@ -106,6 +106,15 @@ func MigrateDb() error {
 		}
 	}
 
+	// 1.6.4 (ZY5): zhdata client credentials. Gated on 1.6.4 rather than a
+	// settings flag because the base version row is what the chain reads;
+	// the step itself is idempotent, so a replay never rotates a uuid.
+	if compareVersions(dbVersion, "1.6.4") < 0 {
+		if err := to1_6_4(tx); err != nil {
+			return fmt.Errorf("migration to 1.6.4 failed: %w", err)
+		}
+	}
+
 	if err := setVersion(tx, currentVersion); err != nil {
 		return fmt.Errorf("update version failed: %w", err)
 	}

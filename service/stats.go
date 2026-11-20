@@ -303,6 +303,9 @@ func (s *StatsService) CloseUserSessions(user string) error {
 	}
 	box.SessionTracker().CloseByUser(user)
 	corePtr.KickUserSessions(user)
+	// zhdata runs outside the core and cuts its own sessions on request
+	// (docs/zhdata-admin-api.md §1.4). Best-effort, next to the core kick.
+	KickZhdataUser(user)
 	return nil
 }
 

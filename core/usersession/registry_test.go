@@ -17,7 +17,7 @@ func (c *fakeConn) Close() error {
 
 // A session with a closer of its own is cut outright.
 func TestCloseUsersClosesTrackedSession(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewRegistry("in")
 	alice := &fakeConn{}
 	bob := &fakeConn{}
 	registry.Track("10.0.0.1:1000", alice)
@@ -38,7 +38,7 @@ func TestCloseUsersClosesTrackedSession(t *testing.T) {
 
 // Without a closer the session is muted instead: nothing it opens is routed.
 func TestCloseUsersMutesUntrackedSession(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewRegistry("in")
 	registry.Bind("alice", "10.0.0.1:1000")
 	registry.Bind("bob", "10.0.0.2:1000")
 
@@ -76,7 +76,7 @@ func TestRejectReportsClose(t *testing.T) {
 }
 
 func TestUntrackForgetsSession(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewRegistry("in")
 	registry.Bind("alice", "10.0.0.1:1000")
 	registry.CloseUsers(map[string]struct{}{})
 	if registry.Allowed("10.0.0.1:1000") {
@@ -93,7 +93,7 @@ func TestUntrackForgetsSession(t *testing.T) {
 
 // A kick cuts what it can close outright.
 func TestKickUserSessionsClosesTrackedSession(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewRegistry("in")
 	alice := &fakeConn{}
 	bob := &fakeConn{}
 	registry.Track("10.0.0.1:1000", alice)
@@ -122,7 +122,7 @@ func TestKickUserSessionsClosesTrackedSession(t *testing.T) {
 // A session with no closer (a QUIC one) is muted instead, and the mute lifts
 // once that session stops trying, so the user is not locked out.
 func TestKickUserSessionsMutesUntilSessionGivesUp(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewRegistry("in")
 	registry.Bind("alice", "10.0.0.1:1000")
 
 	if kicked := registry.KickUserSessions("alice"); kicked != 1 {
@@ -147,7 +147,7 @@ func TestKickUserSessionsMutesUntilSessionGivesUp(t *testing.T) {
 
 // A removal is not a kick: it stays muted however long the client waits.
 func TestCloseUsersMuteDoesNotLiftOnQuiet(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewRegistry("in")
 	registry.Bind("alice", "10.0.0.1:1000")
 	registry.CloseUsers(map[string]struct{}{})
 

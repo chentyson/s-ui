@@ -12,7 +12,7 @@ import (
 	"github.com/alireza0/s-ui/util/common"
 )
 
-var InboundTypeWithLink = []string{"socks", "http", "mixed", "shadowsocks", "naive", "hysteria", "hysteria2", "anytls", "tuic", "vless", "trojan", "vmess"}
+var InboundTypeWithLink = []string{"socks", "http", "mixed", "shadowsocks", "naive", "hysteria", "hysteria2", "anytls", "tuic", "vless", "trojan", "vmess", "zhdata"}
 
 type LinkParam struct {
 	Key   string
@@ -112,6 +112,8 @@ func LinkGenerator(clientConfig json.RawMessage, i *model.Inbound, hostname stri
 		return trojanLink(userConfig["trojan"], *inbound, Addrs)
 	case "vmess":
 		return vmessLink(userConfig["vmess"], *inbound, Addrs)
+	case "zhdata":
+		return zhdataLink(userConfig["zhdata"], *inbound, Addrs)
 	}
 
 	return []string{}
@@ -502,11 +504,56 @@ func vlessLink(
 	return links
 }
 
-func trojanLink(
+// zhdataLink builds the share URI of the zhdata core contract (§3.2):
+//
+//	zhdata://<uuid>@<host1>:<port1>[,<host2>:<port2>]#<remark>
+//
+// A zhdata inbound carries no single listen_port: the frontend stores the
+// port pool in listen_ports (the range already expanded) and the bind host
+// part in listen. The client fans out over every port of the inbound -- the
+// buckets the server splits traffic across to resist per-flow shaping -- so
+// one link per address carries the whole pool, comma joined.
+func zhdataLink(
 	userConfig map[string]interface{},
 	inbound map[string]interface{},
 	addrs []map[string]interface{}) []string {
-	password, _ := userConfig["password"].(string)
+
+	uuid, _ := userConfig["uuid"].(string)
+	if uuid == "" {
+		return []string{}
+	}
+
+	ports := zhdataListenPorts(inbound)
+	var links []string
+	for _, addr := range addrs {
+		host := stringOr(addr["server"], "")
+		var endpoints []string
+		if port, ok := addr["server_port"].(float64); ok && port > 0 {
+			endpoints = []string{fmt.Sprintf("%s:%.0f", HostForURI(host), port)}
+		} else {
+			for _, port := range ports {
+				endpoints = append(endpoints, fmt.Sprintf("%s:%.0f", HostForURI(host), port))
+			}
+		}
+		if len(endpoints) == 0 {
+			continue
+		}
+		u := url.URL{
+			Scheme:   "zhdata",
+			User:     url.User(uuid),
+			Host:     strings.Join(endpoints, ","),
+			Fragment: stringOr(addr["remark"], ""),
+		}
+		links = append(links, u.String())
+	}
+
+	return links
+}
+
+func trojanLink(
+	userConfig map[string]interface{},
+	inbound map[string]interface{},
+	addrs []map[string]interface{}) []string {	password, _ := userConfig["password"].(string)
 	baseParams := getTransportParams(inbound["transport"])
 	var links []string
 

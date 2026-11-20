@@ -125,7 +125,11 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			}
 		}
 
-		if corePtr.IsRunning() {
+		// zhdata is an external type (service/zhdata.go): the panel never
+		// embeds it in the core, so no AddInbound/RemoveInbound here. Saving
+		// it only refreshes the admin-API user set (pushed after the commit
+		// by ConfigService.Save).
+		if corePtr.IsRunning() && !isZhdataInbound(inbound.Type) {
 			if act == "edit" {
 				err = corePtr.RemoveInbound(oldTag)
 				if err != nil && err != os.ErrInvalid {
@@ -177,18 +181,23 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 		if err != nil {
 			return err
 		}
-		if corePtr.IsRunning() {
+		var existing struct {
+			Id   uint
+			Type string
+		}
+		err = tx.Model(model.Inbound{}).Select("id, type").Where("tag = ?", tag).Scan(&existing).Error
+		if err != nil {
+			return err
+		}
+		// zhdata is external: it was never added to the core, so there is
+		// nothing to remove from it (service/zhdata.go).
+		if corePtr.IsRunning() && !isZhdataInbound(existing.Type) {
 			err = corePtr.RemoveInbound(tag)
 			if err != nil && err != os.ErrInvalid {
 				return err
 			}
 		}
-		var id uint
-		err = tx.Model(model.Inbound{}).Select("id").Where("tag = ?", tag).Scan(&id).Error
-		if err != nil {
-			return err
-		}
-		err = s.ClientService.UpdateClientsOnInboundDelete(tx, id, tag)
+		err = s.ClientService.UpdateClientsOnInboundDelete(tx, existing.Id, tag)
 		if err != nil {
 			return err
 		}
@@ -196,6 +205,7 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 		if err != nil {
 			return err
 		}
+		ForgetZhdataSnapshot(tag)
 	default:
 		return common.NewErrorf("unknown action: %s", act)
 	}
@@ -230,6 +240,12 @@ func (s *InboundService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 		return nil, err
 	}
 	for _, inbound := range inbounds {
+		// zhdata is an external type: its process is not the embedded core,
+		// so it must not appear in the sing-box config at all
+		// (docs/zhdata-admin-api.md §2).
+		if isZhdataInbound(inbound.Type) {
+			continue
+		}
 		inboundJson, err := inbound.MarshalJSON()
 		if err != nil {
 			return nil, err
@@ -245,7 +261,7 @@ func (s *InboundService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 
 func (s *InboundService) hasUser(inboundType string) bool {
 	switch inboundType {
-	case "mixed", "socks", "http", "shadowsocks", "vmess", "trojan", "naive", "hysteria", "shadowtls", "tuic", "hysteria2", "vless", "anytls", "snell":
+	case "mixed", "socks", "http", "shadowsocks", "vmess", "trojan", "naive", "hysteria", "shadowtls", "tuic", "hysteria2", "vless", "anytls", "snell", "zhdata":
 		return true
 	}
 	return false
@@ -365,6 +381,11 @@ func (s *InboundService) UpdateInboundsUsers(tx *gorm.DB, ids []uint) error {
 		return err
 	}
 	for _, inbound := range inbounds {
+		// zhdata users reach the external process through the admin API
+		// push, not through an embedded inbound (service/zhdata.go).
+		if isZhdataInbound(inbound.Type) {
+			continue
+		}
 		inboundConfig, err := inbound.MarshalJSON()
 		if err != nil {
 			return err
@@ -415,6 +436,9 @@ func (s *InboundService) RestartInbounds(tx *gorm.DB, ids []uint) error {
 		return err
 	}
 	for _, inbound := range inbounds {
+		if isZhdataInbound(inbound.Type) {
+			continue
+		}
 		err = corePtr.RemoveInbound(inbound.Tag)
 		if err != nil && err != os.ErrInvalid {
 			return err

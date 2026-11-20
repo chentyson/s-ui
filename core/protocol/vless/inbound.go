@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/alireza0/s-ui/core/bwlimit"
+	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -97,7 +98,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		Listen:            options.ListenOptions,
 		ConnectionHandler: inbound,
 	})
-	inbound.sessions = usersession.NewRegistry()
+	inbound.sessions = usersession.NewRegistry(tag)
 	return inbound, nil
 }
 
@@ -142,6 +143,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 }
 
 func (h *Inbound) Close() error {
+	h.sessions.Close()
 	return common.Close(
 		h.service,
 		h.listener,
@@ -188,8 +190,13 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 		// closing this connection. RouteConnectionEx below blocks for as long as
 		// the multiplex session lives, so the deferred untrack is not early.
 		source := metadata.Source.String()
+		if !h.sessions.TryBind(user, source, devlimit.Get(user)) {
+			devlimit.LogRejection(user, source, devlimit.Get(user))
+			h.logger.ErrorContext(ctx, "[", user, "] device limit reached, rejecting multiplex session from ", source)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
+			return
+		}
 		h.sessions.Track(source, conn)
-		h.sessions.Bind(user, source)
 		defer h.sessions.Untrack(source)
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)

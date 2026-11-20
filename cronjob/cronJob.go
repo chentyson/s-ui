@@ -46,6 +46,9 @@ func (c *CronJob) Start(loc *time.Location, trafficAge int, statsBucketSeconds i
 
 	// Start stats job
 	addJob("@every 10s", NewStatsJob(trafficAge > 0, statsBucketSeconds), "stats job")
+	// Sample zhdata external processes' traffic into clients.up/down (15s,
+	// docs/zhdata-admin-api.md §2). SkipIfStillRunning covers a slow process.
+	addJob("@every 15s", NewZhdataStatsJob(), "zhdata stats job")
 	// Start expiry job
 	addJob("@every 1m", NewDepleteJob(), "deplete job")
 	// Periodic global traffic reset, only when a valid cron spec is configured

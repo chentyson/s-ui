@@ -72,8 +72,11 @@ type block struct {
 
 // Registry maps a client address to the user it authenticated as. One instance
 // per inbound. userSources is the reverse index (user -> active sources) that
-// backs per-user device counting.
+// backs per-user device counting. tag namespaces the registry's sources inside
+// the global cross-inbound device table (see global_devices.go); it must be the
+// inbound's tag.
 type Registry struct {
+	tag     string
 	access  sync.Mutex
 	sources map[string]*entry
 	blocked map[string]*block
@@ -85,12 +88,19 @@ type Registry struct {
 	cleanupOnce sync.Once
 }
 
-func NewRegistry() *Registry {
+func NewRegistry(tag string) *Registry {
 	return &Registry{
+		tag:         tag,
 		sources:     make(map[string]*entry),
 		blocked:     make(map[string]*block),
 		userSources: make(map[string]map[string]struct{}),
 	}
+}
+
+// key prefixes a source with this inbound's tag so identical client addresses
+// seen by different inbounds stay separate entries in the global device table.
+func (r *Registry) key(source string) string {
+	return r.tag + keySeparator + source
 }
 
 // StartCleanup launches a background goroutine that periodically removes
@@ -203,9 +213,12 @@ func (r *Registry) Untrack(source string) {
 // TryBind records which user the session at source authenticated as and, if the
 // user is within their device limit, marks the source as an active device. It
 // returns false (without binding) when the user already has limit distinct
-// active sources, so the caller can reject the connection before it is routed.
-// A source that is already active for the same user just bumps its refcount and
-// is always allowed. limit <= 0 means "no limit".
+// active devices across every inbound, so the caller can reject the connection
+// before it is routed. A source that is already active for the same user just
+// bumps its refcount and is always allowed. limit <= 0 means "no limit".
+//
+// The device slots live in the global cross-inbound table, so a client's
+// devices are capped by their sum over all inbounds, not per inbound.
 func (r *Registry) TryBind(user string, source string, limit int) bool {
 	if source == "" || user == "" {
 		return true
@@ -215,12 +228,11 @@ func (r *Registry) TryBind(user string, source string, limit int) bool {
 	e := r.load(source)
 	if e.refs > 0 && e.user == user {
 		e.refs++
+		globalDevices.add(user, r.key(source))
 		return true
 	}
-	if limit > 0 {
-		if set, ok := r.userSources[user]; ok && len(set) >= limit {
-			return false
-		}
+	if limit > 0 && !globalDevices.allow(user, r.key(source), limit) {
+		return false
 	}
 	// The source was active for a different user; release it from that user's
 	// index before reassigning it.
@@ -231,6 +243,7 @@ func (r *Registry) TryBind(user string, source string, limit int) bool {
 				delete(r.userSources, e.user)
 			}
 		}
+		globalDevices.remove(e.user, r.key(source))
 	}
 	e.user = user
 	e.refs = 1
@@ -238,6 +251,9 @@ func (r *Registry) TryBind(user string, source string, limit int) bool {
 		r.userSources[user] = make(map[string]struct{})
 	}
 	r.userSources[user][source] = struct{}{}
+	if limit <= 0 {
+		globalDevices.add(user, r.key(source))
+	}
 	return true
 }
 
@@ -295,9 +311,28 @@ func (r *Registry) removeSourceLocked(source string) {
 				delete(r.userSources, e.user)
 			}
 		}
+		globalDevices.remove(e.user, r.key(source))
 	}
 	delete(r.sources, source)
 	delete(r.blocked, source)
+}
+
+// Close releases every device slot this inbound holds in the global
+// cross-inbound table and stops the periodic cleanup goroutine. The inbound's
+// Close must call it so sessions dying with the inbound do not leak the user's
+// device slots.
+func (r *Registry) Close() {
+	r.StopCleanup()
+	r.access.Lock()
+	defer r.access.Unlock()
+	for source, e := range r.sources {
+		if e.user != "" {
+			globalDevices.remove(e.user, r.key(source))
+		}
+	}
+	r.sources = make(map[string]*entry)
+	r.userSources = make(map[string]map[string]struct{})
+	r.blocked = make(map[string]*block)
 }
 
 // Allowed reports whether connections from source may still be routed. A

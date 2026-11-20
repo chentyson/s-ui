@@ -62,6 +62,8 @@ func FillOutJson(i *model.Inbound, hostname string) error {
 		trojanOut(&outJson, *inbound)
 	case "vmess":
 		vmessOut(&outJson, *inbound)
+	case "zhdata":
+		zhdataOut(&outJson, *inbound)
 	default:
 		for key := range outJson {
 			delete(outJson, key)
@@ -277,5 +279,38 @@ func vmessOut(out *map[string]interface{}, inbound map[string]interface{}) {
 	delete(*out, "transport")
 	if transport, ok := inbound["transport"]; ok {
 		(*out)["transport"] = transport
+	}
+}
+
+// zhdataOut describes a zhdata inbound for the client side. zhdata is not a
+// sing-box outbound: the shape follows the zhdata client config fields (核心
+// 接口文档 §3.1) -- the server is reached over the whole port pool, which the
+// client spreads across (conns lanes bucket over server[i%N]), so the pool
+// rides along in out_json rather than a single port. The uuid is per client
+// (clients.config.zhdata) and never lands here, same as every protocol whose
+// credentials live on the client.
+func zhdataOut(out *map[string]interface{}, inbound map[string]interface{}) {
+	delete(*out, "transport")
+
+	if listen := BuildZhdataListen(inbound); listen != "" {
+		(*out)["listen"] = listen
+	} else if listen, ok := inbound["listen"]; ok {
+		(*out)["listen"] = listen
+	}
+	ports := zhdataListenPorts(inbound)
+	if len(ports) > 0 {
+		(*out)["listen_ports"] = ports
+		(*out)["server_port"] = ports[0]
+	} else {
+		delete(*out, "server_port")
+	}
+	if backend, ok := inbound["backend"]; ok {
+		(*out)["backend"] = backend
+	}
+	if decoy, ok := inbound["decoy"]; ok {
+		(*out)["decoy"] = decoy
+	}
+	if maxSessions, ok := inbound["max_sessions"]; ok {
+		(*out)["max_sessions"] = maxSessions
 	}
 }

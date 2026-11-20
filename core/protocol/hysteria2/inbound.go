@@ -217,7 +217,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		userPasswordList = append(userPasswordList, user.Password)
 	}
 	hysteriaService.UpdateUsers(userList, userPasswordList)
-	inbound.sessions = usersession.NewRegistry()
+	inbound.sessions = usersession.NewRegistry(tag)
 	inbound.service = hysteriaService
 	return inbound, nil
 }
@@ -312,7 +312,7 @@ func (h *Inbound) InterfaceUpdated(ctx context.Context) {
 }
 
 func (h *Inbound) Close() error {
-	h.sessions.StopCleanup()
+	h.sessions.Close()
 	return common.Close(
 		h.listener,
 		h.tlsConfig,

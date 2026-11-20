@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/alireza0/s-ui/core/bwlimit"
+	"github.com/alireza0/s-ui/core/devlimit"
+	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -43,6 +45,19 @@ type Inbound struct {
 	multiService multiUserService
 	// users is replaced wholesale by UpdateUsers while connections read it.
 	users atomic.Pointer[[]option.SnellUser]
+	// sessions counts this inbound's devices into the global cross-inbound
+	// device table and enforces the client's device limit.
+	sessions *usersession.Registry
+}
+
+// deviceSource keys a snell device by its source IP. Snell has no session
+// layer — every request opens its own connection — so a per-port key would
+// let one browsing device occupy dozens of slots of the device limit.
+func deviceSource(source M.Socksaddr) string {
+	if source.IsIP() {
+		return source.AddrPort().Addr().String()
+	}
+	return source.String()
 }
 
 // multiUserService is implemented by the v5 and v6 multi-user services.
@@ -57,6 +72,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		logger:  logger,
 	}
 	inbound.users.Store(&options.Users)
+	inbound.sessions = usersession.NewRegistry(tag)
 	var userList []int
 	var keyList [][]byte
 	if len(options.Users) > 0 {
@@ -137,10 +153,12 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	h.sessions.StartCleanup()
 	return h.listener.Start()
 }
 
 func (h *Inbound) Close() error {
+	h.sessions.Close()
 	return h.listener.Close()
 }
 
@@ -196,6 +214,14 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 		} else {
 			metadata.User = user
 		}
+		src := deviceSource(metadata.Source)
+		if !h.sessions.TryBind(user, src, devlimit.Get(user)) {
+			devlimit.LogRejection(user, src, devlimit.Get(user))
+			h.logger.ErrorContext(ctx, "[", user, "] device limit reached, rejecting connection from ", metadata.Source)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
+			return
+		}
+		onClose = h.sessions.TrackClose(src, onClose)
 		h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 		conn = bwlimit.Wrap(user, conn)
 	} else {
@@ -224,6 +250,14 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 		} else {
 			metadata.User = user
 		}
+		src := deviceSource(metadata.Source)
+		if !h.sessions.TryBind(user, src, devlimit.Get(user)) {
+			devlimit.LogRejection(user, src, devlimit.Get(user))
+			h.logger.ErrorContext(ctx, "[", user, "] device limit reached, rejecting packet connection from ", metadata.Source)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
+			return
+		}
+		onClose = h.sessions.TrackClose(src, onClose)
 		h.logger.InfoContext(ctx, "[", user, "] inbound packet connection from ", metadata.Source)
 	} else {
 		h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)

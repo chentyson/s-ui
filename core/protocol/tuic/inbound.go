@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/alireza0/s-ui/core/bwlimit"
+	"github.com/alireza0/s-ui/core/devlimit"
 	"github.com/alireza0/s-ui/core/usersession"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -106,7 +107,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		userPasswordList = append(userPasswordList, user.Password)
 	}
 	service.UpdateUsers(userList, userUUIDList, userPasswordList)
-	inbound.sessions = usersession.NewRegistry()
+	inbound.sessions = usersession.NewRegistry(tag)
 	inbound.server = service
 	return inbound, nil
 }
@@ -129,7 +130,14 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
-		h.sessions.Bind(userName, source.String())
+		src := source.String()
+		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
+			devlimit.LogRejection(userName, src, devlimit.Get(userName))
+			h.logger.ErrorContext(ctx, "[", userName, "] device limit reached, rejecting connection from ", src)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
+			return
+		}
+		onClose = h.sessions.TrackClose(src, onClose)
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 		conn = bwlimit.Wrap(userName, conn)
 	} else {
@@ -156,7 +164,14 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {
 		metadata.User = userName
-		h.sessions.Bind(userName, source.String())
+		src := source.String()
+		if !h.sessions.TryBind(userName, src, devlimit.Get(userName)) {
+			devlimit.LogRejection(userName, src, devlimit.Get(userName))
+			h.logger.ErrorContext(ctx, "[", userName, "] device limit reached, rejecting packet connection from ", src)
+			N.CloseOnHandshakeFailure(conn, onClose, E.New("登录设备数超过限额"))
+			return
+		}
+		onClose = h.sessions.TrackClose(src, onClose)
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
@@ -183,7 +198,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 }
 
 func (h *Inbound) Close() error {
-	h.sessions.StopCleanup()
+	h.sessions.Close()
 	return common.Close(
 		h.listener,
 		h.tlsConfig,

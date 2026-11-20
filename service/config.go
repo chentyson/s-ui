@@ -482,6 +482,15 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			logger.Error("failed to commit config save: ", cErr)
 			return
 		}
+		// zhdata inbounds are external processes kept in sync through the
+		// admin API rather than the embedded core (service/zhdata.go). Any
+		// client or inbound change alters the user set they should serve;
+		// the push runs after the commit so the process sees what was
+		// really saved, and a zhdata process that is down is a warning,
+		// never a failed panel operation.
+		if obj == "clients" || obj == "inbounds" {
+			PushZhdataUsers(database.GetDB())
+		}
 		// A client's bandwidth cap lives in its group and is read per
 		// connection, so a save that touched one has to push a fresh table.
 		// Reloading on every save is cheaper than working out which ones did.

@@ -118,20 +118,13 @@ func (c *Core) KickUserSessions(user string) int {
 	return kicked
 }
 
-// GetDeviceCounts returns the total active device count per user, aggregated
-// across all inbounds that track user sessions.
+// GetDeviceCounts returns the total active device count per user, read
+// straight from the global cross-inbound device table. The table is the same
+// one TryBind enforces the limit against, so what the panel displays and what
+// the core rejects share one source.
 func (c *Core) GetDeviceCounts() map[string]int {
-	box, err := c.running()
-	if err != nil {
+	if _, err := c.running(); err != nil {
 		return nil
 	}
-	counts := make(map[string]int)
-	for _, inb := range box.inbound.Inbounds() {
-		if counter, ok := inb.(usersession.DeviceCounter); ok {
-			for user, n := range counter.AllUserCounts() {
-				counts[user] += n
-			}
-		}
-	}
-	return counts
+	return usersession.GlobalDeviceCounts()
 }

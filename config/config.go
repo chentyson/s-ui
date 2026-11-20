@@ -33,7 +33,10 @@ const (
 //	ZY3  bwlimit 半关闭修复（core/bwlimit/conn.go：QUIC 类协议 stream 被整条关闭 → 官方 hysteria2/tuic 客户端 EOF）
 //	ZY4  订阅端口新增查询接口 GET /sub/query?key=*** 按 uuid/password 匹配用户，
 //	     返回到期日/流量限额/当前用量/devs/email/enable（sub/queryService.go）
-const VersionSuffix = "ZY4"
+//	ZY5  zhdata external 入站管理（service/zhdata.go、cronjob/zhdataStatsJob.go、
+//	     migration 1.6.4 补 clients.config.zhdata）+ 面板内跨入站全局总设备数
+//	     （core/usersession 全局设备表，TryBind 跨入站合计）
+const VersionSuffix = "ZY5"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

@@ -27,4 +27,7 @@ func (s *DepleteJob) Run() {
 			logger.Error("unable to update inbound users: ", err)
 		}
 	}
+	// zhdata is external: a depleted, disabled client leaves its user set
+	// only through an admin API push (docs/zhdata-admin-api.md §2).
+	PushZhdataUsers()
 }
