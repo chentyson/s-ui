@@ -152,3 +152,33 @@ func TestGlobalDeviceCountsAggregatesAcrossInbounds(t *testing.T) {
 		t.Fatalf("expected 1 device for erin, got %d", counts["erin"])
 	}
 }
+
+// The same table grouped by inbound tag backs the panel's per-inbound badge:
+// one entry per held device slot, refcount bumps not counted extra, releases
+// dropped (a closed inbound falls out of the map entirely).
+func TestGlobalDeviceCountsByTag(t *testing.T) {
+	inA := NewRegistry("countTagA")
+	inB := NewRegistry("countTagB")
+
+	inA.TryBind("frank", "10.9.0.1:1", 0)
+	inA.TryBind("frank", "10.9.0.2:1", 0)
+	inA.TryBind("frank", "10.9.0.1:1", 0) // refcount, not a new device
+	inB.TryBind("gina", "10.9.0.1:1", 0)  // same source, other tag: its own slot
+
+	counts := GlobalDeviceCountsByTag()
+	if counts["countTagA"] != 2 {
+		t.Errorf("countTagA = %d, want 2 distinct device slots", counts["countTagA"])
+	}
+	if counts["countTagB"] != 1 {
+		t.Errorf("countTagB = %d, want 1", counts["countTagB"])
+	}
+
+	inA.Close()
+	counts = GlobalDeviceCountsByTag()
+	if counts["countTagA"] != 0 {
+		t.Errorf("countTagA = %d after close, want 0/absent", counts["countTagA"])
+	}
+	if counts["countTagB"] != 1 {
+		t.Errorf("countTagB = %d, want the other inbound untouched", counts["countTagB"])
+	}
+}

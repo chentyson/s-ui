@@ -128,3 +128,12 @@ func (c *Core) GetDeviceCounts() map[string]int {
 	}
 	return usersession.GlobalDeviceCounts()
 }
+
+// GetDeviceCountsByTag groups the same global device table by inbound tag:
+// the live device count per embedded inbound, for the panel's badges.
+func (c *Core) GetDeviceCountsByTag() map[string]int {
+	if _, err := c.running(); err != nil {
+		return nil
+	}
+	return usersession.GlobalDeviceCountsByTag()
+}

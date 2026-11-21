@@ -89,6 +89,7 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - migration（对齐 1_6_3.go 写法）：存量客户复制其 vless uuid（没有则新造）填入 `config.zhdata.uuid`。
 - 前端 randomConfigs 生成同样形状；Client.vue 里 zhdata 块显示/刷新 uuid。
 - 链接：`zhdata://<uuid>@<host>:<port>[,<host2>:<port2>]#<remark>`（已在核心接口文档 §3.2 定案）。
+  面板只写端点池的**第一个端口**：客户端 `slot i → servers[i%N]`（zhdata client.go），单端口就是一条可用入站；64 端口全列会让 URI 变成几百字节、客户端导入吃力。多端口（多服务器）留给手工拼接。
 
 ## 4. 面板内全局总设备数（与 zhdata 无关的独立改进）
 
@@ -151,14 +152,20 @@ zhdata 入站可把流量**字节级直通**转发给上游 zhdata（级联出�
 
 面板"连接列表"弹窗（Sessions.vue，resource=inbound/user）读内嵌 SessionTracker；zhdata 是 external 进程，核心看不到，改由 admin 面拉取（同一 -admin/-admin-token 鉴权，5s 超时）。
 
-- `GET /v1/sessions` → `{"ts":<unix s>,"sessions":[{"uuid","device"(32hex),"slot":int,"remote":"ip:port","started_at":<unix s>,"relay":bool}]}`。
-  - 条目 = **隧道会话**（uuid+device 的一条 slot），不是每条应用流一条；relay 管道也计入（`relay:true`）。
+- `GET /v1/sessions[?limit=n]` → `{"ts":<unix s>,"total":N,"sessions":[{"uuid","device"(32hex,""=旧 zhv4/5/6 握手),"slot":int,"remote":"ip:port","started_at":<unix s>,"relay":bool}]}`。
+  - `limit`：默认 50，有效区间 10<n<100（面板用 100）；按 started_at 取最近 n 条，`total`=未截断总数（响应无 total 视为未截断）。
+  - `started_at`/`ts` 均为 **unix 秒**（与面板 SessionInfo.createdAt、tracker `Unix()` 同单位，不换算）。
+  - 条目 = **隧道会话**（uuid+device 的一条 slot），不是每条应用流一条；relay 管道也计入（`relay:true`）；空 device 合法（去重键必须含 uuid）。
   - 无每会话流量计数（uuid 累计在 §1.3 /v1/stats）。
 - 面板映射（service/zhdata.go `zhdataSessions`，对齐 core.SessionInfo/Sessions.vue 字段）：
-  - `id = "<入站tag>:<device>:<slot>"`；`inbound` = 入站 tag；`user` = uuid 反查面板客户 name（查不到显示 uuid）；
+  - `id = "<入站tag>:<uuid>:<device>:<slot>"`；`inbound` = 入站 tag；`user` = uuid 反查面板客户 name（查不到显示 uuid）；
   - `network = "zhdata"`（`relay:true` 的条目把 `rule` 置 `"relay"` 以在 tooltip 显示）；`source` = remote；`destination` = ""（隧道会话无目的地，流由对端解析）；`created_at` = started_at（**秒**，与 tracker 快照 `CreatedAt.Unix()` 同单位）；`up/down` = 0。
   - 拉取失败/超时：warning + 该入站按空列表处理，不缓存（弹窗自带 5s 自动刷新）。
 - 查询路径（service/stats.go GetSessions）：
   - `resource=inbound` 且 tag 是 zhdata 入站 → 只查该进程；
   - `resource=user` 且客户有 config.zhdata.uuid → 遍历全部 zhdata 入站拉取、按 uuid 过滤、与内嵌会话合并去重（按 created_at 倒序）。
 - Close All（StatsService.CloseUserSessions）：先 `POST /v1/users/kick` 全部 zhdata 入站（与内嵌 core 是否在跑无关；kick 语义=断会话/管道，客户端会重连除非已 disable，见 §1.4），再走原有内嵌 CloseByUser/KickUserSessions，行为不变。
+- 在线徽章数字（onlines JSON 新增 `"inboundCounts": {<入站tag>: <设备数>}`，GetOnlines 实时组装）：
+  - zhdata 入站 = 该入站 `GET /v1/stats` 各 uuid devices 求和（与 online overlay 同一采集、同一 staleness 门，15s 采样，失联即从 map 消失；空闲入站也在 map 中值为 0）；
+  - 内嵌入站 = usersession 全局设备表按 `tag\x1fsource` 前缀聚合（`GlobalDeviceCountsByTag`，与 TryBind/GetDeviceCounts 同源）；
+  - 两侧 tag 不冲突，直接合并；前端按此字段显示数字（缺字段则回落旧"在线点"逻辑）。

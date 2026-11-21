@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -331,14 +332,40 @@ var (
 // header counts, inbound card marks) read that cache, not clients.online_at.
 // Stale samples are dropped, so a zhdata process that stopped reporting
 // stops marking anyone online. The 45s window is 3 collection cycles.
-const zhdataOnlineStaleness = 45
+const (
+	// zhdataOnlineStaleness drops a stale overlay (process stopped
+	// reporting): 3 collection cycles at the 15s cadence.
+	zhdataOnlineStaleness = 45
+	// zhdataSessionsLimit asks the process for its 100 newest sessions
+	// (contract: /v1/sessions?limit=n, started_at order, "total" reports
+	// the untruncated count). The modal shows a page at a time; 100 bounds
+	// the payload. A response without "total" simply means no truncation
+	// signal, which the panel does not render yet.
+	zhdataSessionsLimit = 100
+)
 
 var (
 	zhdataOnlineMu        sync.Mutex
 	zhdataOnlineSampledAt int64
-	zhdataOnlineUsers     []string // client names
-	zhdataOnlineInbounds  []string // inbound tags with at least one active device
+	zhdataOnlineUsers     []string       // client names
+	zhdataOnlineInbounds  []string       // inbound tags with at least one active device
+	zhdataOnlineCounts    map[string]int // every sampled zhdata tag -> summed devices
 )
+
+// zhdataInboundCounts returns the zhdata half of onlines.inboundCounts (tag ->
+// summed uuid devices), or nil when the overlay is stale.
+func zhdataInboundCounts() map[string]int {
+	zhdataOnlineMu.Lock()
+	defer zhdataOnlineMu.Unlock()
+	if zhdataOnlineSampledAt == 0 || time.Now().Unix()-zhdataOnlineSampledAt > zhdataOnlineStaleness {
+		return nil
+	}
+	counts := make(map[string]int, len(zhdataOnlineCounts))
+	for tag, n := range zhdataOnlineCounts {
+		counts[tag] = n
+	}
+	return counts
+}
 
 // mergeZhdataOnline folds the overlay into a freshly built onlineResources
 // (called by SaveStats right before it publishes one).
@@ -400,6 +427,7 @@ func CollectZhdataStats() {
 	crossTraffic := map[string]*traffic{}
 	onlineUuids := map[string]bool{}
 	var onlineTags []string
+	deviceTotals := map[string]int{}
 	sampledAny := false
 
 	for _, inbound := range inbounds {
@@ -439,7 +467,9 @@ func CollectZhdataStats() {
 		zhdataStatsMu.Unlock()
 
 		tagOnline := false
+		tagDevices := 0
 		for uuid, entry := range current {
+			tagDevices += entry.devices
 			if entry.devices > 0 {
 				onlineUuids[uuid] = true
 				tagOnline = true
@@ -472,6 +502,9 @@ func CollectZhdataStats() {
 		if tagOnline {
 			onlineTags = append(onlineTags, inbound.Tag)
 		}
+		// The badge number: every uuid's active devices on this process,
+		// idle tags included (0 is a real answer, not a missing one).
+		deviceTotals[inbound.Tag] = tagDevices
 	}
 
 	if !sampledAny {
@@ -559,6 +592,7 @@ func CollectZhdataStats() {
 	zhdataOnlineMu.Lock()
 	zhdataOnlineUsers = onlineUsers
 	zhdataOnlineInbounds = onlineTags
+	zhdataOnlineCounts = deviceTotals
 	zhdataOnlineSampledAt = now
 	zhdataOnlineMu.Unlock()
 }
@@ -640,13 +674,14 @@ func zhdataSessions(db *gorm.DB, inbound *model.Inbound, filterUUID string) []co
 	if err != nil || opts.AdminAddr == "" {
 		return nil
 	}
-	response, err := zhdataAdminRequest(opts, http.MethodGet, "/v1/sessions", nil)
+	response, err := zhdataAdminRequest(opts, http.MethodGet, "/v1/sessions?limit="+strconv.Itoa(zhdataSessionsLimit), nil)
 	if err != nil {
 		logger.Warning("zhdata sessions: ", inbound.Tag, " (", opts.AdminAddr, "): ", err)
 		return nil
 	}
 	var payload struct {
 		Ts       int64           `json:"ts"`
+		Total    int             `json:"total"` // absent on cores without truncation signaling: means "not truncated", nothing to render
 		Sessions []zhdataSession `json:"sessions"`
 	}
 	if err := json.Unmarshal(response, &payload); err != nil {
@@ -686,7 +721,9 @@ func zhdataSessions(db *gorm.DB, inbound *model.Inbound, filterUUID string) []co
 			user = session.UUID
 		}
 		entry := core.SessionInfo{
-			ID:        fmt.Sprintf("%s:%s:%d", inbound.Tag, session.Device, session.Slot),
+			// uuid belongs in the id: legacy zhv4/5/6 handshakes report an
+			// empty device, so device+slot alone can collide across uuids.
+			ID:        fmt.Sprintf("%s:%s:%s:%d", inbound.Tag, session.UUID, session.Device, session.Slot),
 			Inbound:   inbound.Tag,
 			User:      user,
 			Network:   "zhdata",

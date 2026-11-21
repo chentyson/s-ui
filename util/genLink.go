@@ -506,13 +506,16 @@ func vlessLink(
 
 // zhdataLink builds the share URI of the zhdata core contract (§3.2):
 //
-//	zhdata://<uuid>@<host1>:<port1>[,<host2>:<port2>]#<remark>
+//	zhdata://<uuid>@<host>:<port>#<remark>
 //
 // A zhdata inbound carries no single listen_port: the frontend stores the
 // port pool in listen_ports (the range already expanded) and the bind host
-// part in listen. The client fans out over every port of the inbound -- the
-// buckets the server splits traffic across to resist per-flow shaping -- so
-// one link per address carries the whole pool, comma joined.
+// part in listen. The link names only the pool's first port. The client dials
+// slot i at servers[i%N] (zhdata client.go), so one endpoint is a working
+// inbound -- every lane simply rides the same port -- while the pool's extra
+// ports are a server-side spread the client needs no part in picking. Listing
+// all of them turned a 64-port inbound into a several-hundred-byte URI that
+// clients choke on.
 func zhdataLink(
 	userConfig map[string]interface{},
 	inbound map[string]interface{},
@@ -527,21 +530,19 @@ func zhdataLink(
 	var links []string
 	for _, addr := range addrs {
 		host := stringOr(addr["server"], "")
-		var endpoints []string
-		if port, ok := addr["server_port"].(float64); ok && port > 0 {
-			endpoints = []string{fmt.Sprintf("%s:%.0f", HostForURI(host), port)}
-		} else {
-			for _, port := range ports {
-				endpoints = append(endpoints, fmt.Sprintf("%s:%.0f", HostForURI(host), port))
-			}
+
+		port, _ := addr["server_port"].(float64)
+		if port <= 0 && len(ports) > 0 {
+			port = ports[0]
 		}
-		if len(endpoints) == 0 {
+		if port <= 0 {
 			continue
 		}
+
 		u := url.URL{
 			Scheme:   "zhdata",
 			User:     url.User(uuid),
-			Host:     strings.Join(endpoints, ","),
+			Host:     fmt.Sprintf("%s:%.0f", HostForURI(host), port),
 			Fragment: stringOr(addr["remark"], ""),
 		}
 		links = append(links, u.String())

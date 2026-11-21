@@ -47,12 +47,13 @@ func TestBuildZhdataListen(t *testing.T) {
 	}
 }
 
-// A zhdata share link carries the uuid, every port of the inbound's pool
-// comma joined, and the remark (契约 §3.2).
+// A zhdata share link carries the uuid, the inbound's first port, and the
+// remark (契约 §3.2). The rest of the pool stays server-side: the client dials
+// one endpoint and spreads its own lanes over it.
 func TestLinkGeneratorZhdata(t *testing.T) {
 	inbound := zhdataInbound(t, map[string]interface{}{
 		"listen":       "",
-		"listen_ports": []interface{}{49888.0, 49889.0},
+		"listen_ports": []interface{}{49888.0, 49889.0, 49951.0},
 		"backend":      "direct",
 	})
 	config := clientConfigFor(t, "zhdata", map[string]interface{}{
@@ -76,8 +77,8 @@ func TestLinkGeneratorZhdata(t *testing.T) {
 	if parsed.User.Username() != "b831381d-6324-4d53-ad4f-8cda48b30811" {
 		t.Errorf("uuid = %q, want the client's zhdata uuid", parsed.User.Username())
 	}
-	if parsed.Host != "example.test:49888,example.test:49889" {
-		t.Errorf("host = %q, want the whole port pool comma joined", parsed.Host)
+	if parsed.Host != "example.test:49888" {
+		t.Errorf("host = %q, want the pool's first port only", parsed.Host)
 	}
 	if parsed.Fragment != "someone-zhdata-in" {
 		t.Errorf("remark = %q, want someone-zhdata-in", parsed.Fragment)

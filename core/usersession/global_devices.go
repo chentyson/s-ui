@@ -12,7 +12,10 @@
 // displays and the limit TryBind enforces share one source of truth.
 package usersession
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // keySeparator cannot appear in an inbound tag or in a serialised source
 // address, so concatenating tag and source below is unambiguous.
@@ -90,6 +93,24 @@ func GlobalDeviceCounts() map[string]int {
 	for user, set := range globalDevices.devices {
 		if len(set) > 0 {
 			counts[user] = len(set)
+		}
+	}
+	return counts
+}
+
+// GlobalDeviceCountsByTag snapshots the same table grouped by inbound tag
+// instead of by user. Every held key is "tag<sep>source", so counting keys by
+// their prefix gives the device slots each inbound currently holds -- the
+// panel's per-inbound online count, same source of truth as TryBind.
+func GlobalDeviceCountsByTag() map[string]int {
+	globalDevices.access.Lock()
+	defer globalDevices.access.Unlock()
+	counts := map[string]int{}
+	for _, set := range globalDevices.devices {
+		for key := range set {
+			if i := strings.Index(key, keySeparator); i > 0 {
+				counts[key[:i]]++
+			}
 		}
 	}
 	return counts

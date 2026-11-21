@@ -18,6 +18,7 @@ import (
 type onlines struct {
 	User           []string         `json:"user"`
 	UserCounts     map[string]int   `json:"userCounts"`
+	InboundCounts  map[string]int   `json:"inboundCounts"`
 	RejectionUsers []string         `json:"rejectionUsers"`
 	Inbound        []string         `json:"inbound"`
 	Outbound       []string         `json:"outbound"`
@@ -245,6 +246,21 @@ func (s *StatsService) GetOnlines() (onlines, error) {
 			result.UserCounts = counts
 		}
 	}
+	// Per-inbound live device counts for the inbound badges. Embedded
+	// inbounds come from the same global device table TryBind enforces;
+	// zhdata inbounds (external processes) from the stats overlay's summed
+	// uuid devices (service/zhdata.go). Tag keys never collide between the
+	// two, so a straight merge is correct.
+	countsByTag := map[string]int{}
+	if corePtr != nil {
+		for tag, n := range corePtr.GetDeviceCountsByTag() {
+			countsByTag[tag] = n
+		}
+	}
+	for tag, n := range zhdataInboundCounts() {
+		countsByTag[tag] = n
+	}
+	result.InboundCounts = countsByTag
 	result.RejectionUsers = devlimit.GetRejectionUsers()
 	return result, nil
 }

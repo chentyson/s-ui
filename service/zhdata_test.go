@@ -210,6 +210,7 @@ type fakeZhdataAdmin struct {
 	relays   []string
 	stats    string
 	sessions string
+	queries  []string
 	requests int
 }
 
@@ -234,6 +235,7 @@ func (f *fakeZhdataAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/stats":
 		_, _ = w.Write([]byte(f.stats))
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+		f.queries = append(f.queries, r.URL.RawQuery)
 		_, _ = w.Write([]byte(f.sessions))
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
@@ -504,6 +506,20 @@ func TestCollectZhdataStatsMarksOnline(t *testing.T) {
 		}
 	}
 
+	// onlines.inboundCounts: zhdata tag -> summed uuid devices (erin 1 +
+	// frank 0 per process). GetOnlines with an unstarted core carries the
+	// zhdata half only.
+	if counts := zhdataInboundCounts(); counts["zhdata-online-a"] != 1 || counts["zhdata-online-b"] != 1 {
+		t.Errorf("zhdataInboundCounts = %v, want both tags at 1 (devices summed per uuid)", counts)
+	}
+	res, err := (&StatsService{}).GetOnlines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.InboundCounts["zhdata-online-a"] != 1 || res.InboundCounts["zhdata-online-b"] != 1 {
+		t.Errorf("GetOnlines inboundCounts = %v, want zhdata tags at 1", res.InboundCounts)
+	}
+
 	// A stale overlay (process stopped reporting) marks nobody.
 	zhdataOnlineMu.Lock()
 	zhdataOnlineSampledAt = time.Now().Unix() - zhdataOnlineStaleness - 1
@@ -512,6 +528,16 @@ func TestCollectZhdataStatsMarksOnline(t *testing.T) {
 	mergeZhdataOnline(online)
 	if len(online.User) != 0 || len(online.Inbound) != 0 {
 		t.Errorf("stale overlay merged: users=%v inbounds=%v, want empty", online.User, online.Inbound)
+	}
+	if counts := zhdataInboundCounts(); counts != nil {
+		t.Errorf("stale zhdataInboundCounts = %v, want nil", counts)
+	}
+	res, err = (&StatsService{}).GetOnlines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := res.InboundCounts["zhdata-online-a"]; ok {
+		t.Errorf("stale zhdata tag still in inboundCounts: %v", res.InboundCounts)
 	}
 }
 
@@ -540,10 +566,11 @@ func TestZhdataSessionsBridge(t *testing.T) {
 	seedZhdataClient(t, db, "gina", 0, "gggggggg-0000-4000-8000-000000000007", []uint{})
 
 	admin.mu.Lock()
-	admin.sessions = `{"ts":9,"sessions":[` +
+	admin.sessions = `{"ts":9,"total":4,"sessions":[` +
 		`{"uuid":"gggggggg-0000-4000-8000-000000000007","device":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot":3,"remote":"1.2.3.4:5555","started_at":1732000000,"relay":false},` +
 		`{"uuid":"gggggggg-0000-4000-8000-000000000007","device":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","slot":9,"remote":"5.6.7.8:1","started_at":1732000100,"relay":true},` +
-		`{"uuid":"hhhhhhhh-0000-4000-8000-000000000008","device":"cccccccccccccccccccccccccccccccc","slot":0,"remote":"9.9.9.9:2","started_at":1732000200,"relay":false}]}`
+		`{"uuid":"hhhhhhhh-0000-4000-8000-000000000008","device":"cccccccccccccccccccccccccccccccc","slot":0,"remote":"9.9.9.9:2","started_at":1732000200,"relay":false},` +
+		`{"uuid":"iiiiiiii-0000-4000-8000-000000000009","device":"","slot":0,"remote":"7.7.7.7:7","started_at":1731999000,"relay":false}]}`
 	admin.mu.Unlock()
 
 	s := &StatsService{}
@@ -553,8 +580,16 @@ func TestZhdataSessionsBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 3 {
-		t.Fatalf("zhdata inbound sessions = %d, want 3: %+v", len(list), list)
+	if len(list) != 4 {
+		t.Fatalf("zhdata inbound sessions = %d, want 4: %+v", len(list), list)
+	}
+	admin.mu.Lock()
+	queries := append([]string(nil), admin.queries...)
+	admin.mu.Unlock()
+	for _, q := range queries {
+		if !strings.Contains(q, "limit=100") {
+			t.Errorf("sessions query = %q, want limit=100", q)
+		}
 	}
 	var relay *core.SessionInfo
 	for i := range list {
@@ -565,8 +600,8 @@ func TestZhdataSessionsBridge(t *testing.T) {
 	if relay == nil {
 		t.Fatal("relay flag not carried into the mapping")
 	}
-	if relay.ID != "zhdata-sess-a:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:9" {
-		t.Errorf("id = %q, want tag:device:slot", relay.ID)
+	if relay.ID != "zhdata-sess-a:gggggggg-0000-4000-8000-000000000007:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:9" {
+		t.Errorf("id = %q, want tag:uuid:device:slot", relay.ID)
 	}
 	if relay.Inbound != "zhdata-sess-a" || relay.User != "gina" {
 		t.Errorf("inbound/user = %q/%q, want zhdata-sess-a/gina", relay.Inbound, relay.User)
@@ -591,13 +626,23 @@ func TestZhdataSessionsBridge(t *testing.T) {
 	}
 	// A uuid with no panel client shows the uuid itself.
 	found := false
+	emptyDevice := false
 	for _, session := range list {
 		if session.User == "hhhhhhhh-0000-4000-8000-000000000008" {
 			found = true
 		}
+		// Legacy zhv4/5/6 handshakes report an empty device; the uuid in
+		// the id keeps such rows unique and renderable.
+		if session.ID == "zhdata-sess-a:iiiiiiii-0000-4000-8000-000000000009::0" &&
+			session.User == "iiiiiiii-0000-4000-8000-000000000009" {
+			emptyDevice = true
+		}
 	}
 	if !found {
 		t.Error("unresolved uuid should be displayed as-is")
+	}
+	if !emptyDevice {
+		t.Error("empty-device session missing or id not unique via uuid")
 	}
 
 	// --- user query across both zhdata inbounds, merged and filtered ---
