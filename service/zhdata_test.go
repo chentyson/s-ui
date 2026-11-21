@@ -205,6 +205,7 @@ type fakeZhdataAdmin struct {
 	mu       sync.Mutex
 	users    []byte
 	kicks    []string
+	relays   []string
 	stats    string
 	requests int
 }
@@ -223,6 +224,10 @@ func (f *fakeZhdataAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.kicks = append(f.kicks, string(body))
 		_, _ = w.Write([]byte(`{"kicked":1}`))
+	case r.Method == http.MethodPut && r.URL.Path == "/v1/relay":
+		body, _ := io.ReadAll(r.Body)
+		f.relays = append(f.relays, string(body))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/stats":
 		_, _ = w.Write([]byte(f.stats))
 	default:
@@ -375,5 +380,51 @@ func TestKickZhdataUser(t *testing.T) {
 	defer admin.mu.Unlock()
 	if len(admin.kicks) != 1 {
 		t.Fatalf("plain client kick reached the API: %v", admin.kicks)
+	}
+}
+
+// Relay state is pure inbound options pushed to every zhdata process
+// (contract §6): upstream list -> enabled, empty list -> disabled.
+func TestPushZhdataRelay(t *testing.T) {
+	db := zhdataTestDB(t)
+
+	admin := &fakeZhdataAdmin{}
+	server := httptest.NewServer(admin)
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+
+	seedZhdataInbound(t, db, "zhdata-relay", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`","upstream":["10.0.0.1:49888","10.0.0.2:49889"]}`)
+	seedZhdataInbound(t, db, "zhdata-plain", `{"listen":"","listen_ports":[49890],"admin_addr":"`+addr+`"}`)
+
+	PushZhdataRelay(db)
+
+	admin.mu.Lock()
+	defer admin.mu.Unlock()
+	if len(admin.relays) != 2 {
+		t.Fatalf("expected one PUT /v1/relay per zhdata inbound, got %v", admin.relays)
+	}
+
+	var on, off struct {
+		Upstream []string `json:"upstream"`
+		Enabled  *bool    `json:"enabled"`
+	}
+	if err := json.Unmarshal([]byte(admin.relays[0]), &on); err != nil {
+		t.Fatal(err)
+	}
+	if on.Enabled == nil || !*on.Enabled {
+		t.Errorf("relay inbound: enabled = %v, want true", on.Enabled)
+	}
+	if len(on.Upstream) != 2 || on.Upstream[0] != "10.0.0.1:49888" || on.Upstream[1] != "10.0.0.2:49889" {
+		t.Errorf("relay inbound: upstream = %v, want both hosts", on.Upstream)
+	}
+
+	if err := json.Unmarshal([]byte(admin.relays[1]), &off); err != nil {
+		t.Fatal(err)
+	}
+	if off.Enabled == nil || *off.Enabled {
+		t.Errorf("plain inbound: enabled = %v, want false", off.Enabled)
+	}
+	if off.Upstream == nil || len(off.Upstream) != 0 {
+		t.Errorf("plain inbound: upstream = %v, want an explicit empty list", off.Upstream)
 	}
 }

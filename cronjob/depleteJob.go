@@ -28,6 +28,8 @@ func (s *DepleteJob) Run() {
 		}
 	}
 	// zhdata is external: a depleted, disabled client leaves its user set
-	// only through an admin API push (docs/zhdata-admin-api.md §2).
+	// only through an admin API push (docs/zhdata-admin-api.md §2). The
+	// relay state push rides the same hook (contract §6).
 	PushZhdataUsers()
+	PushZhdataRelay()
 }

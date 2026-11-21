@@ -36,7 +36,9 @@ const (
 //	ZY5  zhdata external 入站管理（service/zhdata.go、cronjob/zhdataStatsJob.go、
 //	     migration 1.6.4 补 clients.config.zhdata）+ 面板内跨入站全局总设备数
 //	     （core/usersession 全局设备表，TryBind 跨入站合计）
-const VersionSuffix = "ZY5"
+//	ZY6  zhdata 出站（内嵌 box 注册 core/protocol/zhdata，依赖 zhdata v0.15.2 库化）+
+//	     zhdata 入站 transparent relay（options.upstream → PUT /v1/relay）
+const VersionSuffix = "ZY6"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

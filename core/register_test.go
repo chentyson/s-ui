@@ -38,6 +38,9 @@ func TestOutboundRegistry(t *testing.T) {
 		C.TypeHysteria, C.TypeHysteria2, C.TypeTUIC,
 		// new in 1.14
 		C.TypeSnell, C.TypeBridge,
+		// sui: zhdata outbound through the embedded box (zhdata is not a
+		// sing-box constant; s-ui owns the type string, contract §7)
+		"zhdata",
 	)
 }
 

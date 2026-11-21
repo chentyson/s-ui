@@ -26,3 +26,9 @@ func (s *ZhdataStatsJob) Run() {
 func PushZhdataUsers() {
 	service.PushZhdataUsersLatest()
 }
+
+// PushZhdataRelay keeps the transparent-relay state of every zhdata process
+// aligned with the panel (contract §6); same hook points as the user push.
+func PushZhdataRelay() {
+	service.PushZhdataRelayLatest()
+}

@@ -103,3 +103,45 @@ JSON 端点（全部 `Content-Type: application/json`）：
 3. 该客户再订一个 hysteria2 入站：面板设备数限额 2 → 两协议合计同时只允许 2 台（面板内嵌协议精确；zhdata 侧按推送 max_devices 独立限）。
 4. 面板流量列 = hysteria2 流量 + zhdata 流量之和；15s 刷新；超额 DepleteClients 后 zhdata 新连接被拒。
 5. 面板 Kick → zhdata 会话被切（日志出现 reject）。
+
+## 6. zhdata 入站 transparent relay（zhdata→zhdata 透明转发，s-ui v1.6.3-ZY6+ / zhdata core ≥0.15.2）
+
+zhdata 入站可把流量**字节级直通**转发给上游 zhdata（级联出口：VPS-A 面板侧鉴权/统计/限额，上游 zhdata-B 出网）。
+
+- 入站 Options 新增字段：`"upstream": ["host:port", ...]`（字符串数组，host:port 列表；空/缺省 = 普通 direct 后端）。
+- zhdata core 管理面（与 /v1/users 同一 -admin/-admin-token 鉴权）：
+  - `PUT /v1/relay` 请求 `{"upstream":["10.0.0.1:49888"],"enabled":true}`（两字段可单独给；只给 enabled 保留现有 upstream；`enabled=true` 且列表为空 → 400；地址非法 → 400）。返回 `{"ok":true,"upstream":N,"enabled":true}`。
+  - `GET /v1/relay` 返回 `{"enabled":bool,"upstream":[...],"pipes":N}`（pipes=当前在转发的管道数）。
+  - 面板发禁用：`{"upstream":[],"enabled":false}`（清空+关闭；`enabled=false` 只影响新连接，已有管道走原 upstream 至自然结束）。
+- 语义：
+  - **字节直通**：下游会话到 zhdata 后不再解隧道，原样（含握手/帧）转发到 upstream（多 upstream 按连接轮询/粘性，P0 任一可达即可）。
+  - **控制面保留在本地进程**：users 鉴权（PUT /v1/users）、stats 计数（GET /v1/stats，relay 会话照常计 up/down/devices）、kick（POST /v1/users/kick = 断开整条管道）全部仍由面板对接的这级 zhdata 执行；uuid/device_id 用下游客户端自己的。
+  - zhdata 核心 <0.15.2 时对 `/v1/relay` 返回 404，面板只 warning。
+- s-ui 侧：`upstream` 是纯入站 options，不拼内嵌 box；推送点与 users 完全相同（ConfigService.Save 提交后 obj∈{clients,inbounds} + deplete 后），逐 zhdata 入站 `PUT /v1/relay`。
+
+## 7. zhdata 出站（内嵌 sing-box box 的出站，s-ui v1.6.3-ZY6+）
+
+面板内嵌 sing-box 需要把其它入站（vless/hy2/...）的流量经 zhdata 通道送出去时，用内嵌 box 的 zhdata 出站（区别于 §2 的 external 入站进程）。
+
+- 依赖：Go module `github.com/chentyson/zhdata`（v0.15.2 起库化）。开发期 `go.mod`：
+  `require github.com/chentyson/zhdata v0.0.0` + `replace github.com/chentyson/zhdata => ../v2rayn/zhdata-src`。
+- 注册：`core/register.go` 无条件 `outbound.Register[zhdata.ZhdataOutboundOptions](registry, "zhdata", ...)`；包在 `core/protocol/zhdata`。
+- Options JSON（s-ui 出站编辑器 / config.json 出站条目）：
+```json
+{
+  "type": "zhdata",
+  "tag": "zhdata-out",
+  "server": "1.2.3.4",
+  "server_port": 49888,
+  "uuid": "<出站 uuid>",
+  "conns": 16,
+  "spread": 8,
+  "connect_timeout": "5s"
+}
+```
+  - `uuid`：出站自己的凭据（与面板客户无关；不需要 users 推送——它是客户端侧）。
+  - `device_id` 不出现在配置里：出站实例懒加载 `zhdata.NewClient` 时 DeviceID=nil（本机随机、进程存续期稳定）。
+  - `conns/spread` 透传 zhdata ClientConfig；0=核心默认。`connect_timeout`（badoption.Duration）作用于 DialContext（调用方已有 deadline 时不覆盖）。
+  - 懒加载：首个 Dial 才建 `zhdata.Client`（Servers=[server:port]）；出站 Close 释放。
+- **UDP 不支持**：zhdata 无 PacketConn；Network() 只声明 tcp，ListenPacket 返回明确错误 `zhdata outbound: udp not supported`。
+- 库语义（zhdata v0.15.2，已核对）：`DialContext` 等服务端 tOpenAck 才返回；返回的 net.Conn 另实现 `CloseWrite() error`（半关闭透传）；host 可为域名（服务端解析）；`Conns<=0→16`、`Spread<=0→8`；库客户端不监听本地端口，无端口冲突。

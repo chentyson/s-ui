@@ -487,9 +487,11 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		// client or inbound change alters the user set they should serve;
 		// the push runs after the commit so the process sees what was
 		// really saved, and a zhdata process that is down is a warning,
-		// never a failed panel operation.
+		// never a failed panel operation. The relay state rides along:
+		// it is pure inbound options, so the same hook covers it (contract §6).
 		if obj == "clients" || obj == "inbounds" {
 			PushZhdataUsers(database.GetDB())
+			PushZhdataRelay(database.GetDB())
 		}
 		// A client's bandwidth cap lives in its group and is read per
 		// connection, so a save that touched one has to push a fresh table.

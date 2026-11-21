@@ -10,6 +10,7 @@ import (
 	suiTuic "github.com/alireza0/s-ui/core/protocol/tuic"
 	suiVless "github.com/alireza0/s-ui/core/protocol/vless"
 	suiVmess "github.com/alireza0/s-ui/core/protocol/vmess"
+	suiZhdata "github.com/alireza0/s-ui/core/protocol/zhdata"
 
 	sbCertificate "github.com/sagernet/sing-box/adapter/certificate"
 	"github.com/sagernet/sing-box/adapter/endpoint"
@@ -114,6 +115,10 @@ func OutboundRegistry() *outbound.Registry {
 	hysteria.RegisterOutbound(registry)
 	tuic.RegisterOutbound(registry)
 	hysteria2.RegisterOutbound(registry)
+
+	// zhdata rides the embedded box as an outbound (contract §7); the
+	// external zhdata inbound process (§2) stays out of the box entirely.
+	suiZhdata.RegisterOutbound(registry)
 
 	return registry
 }

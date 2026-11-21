@@ -48,13 +48,17 @@ const zhdataAdminTimeout = 5 * time.Second
 // They mirror the zhdata server config names so the same row can one day
 // generate `-c config.json`.
 type zhdataOptions struct {
-	Tag         string `json:"tag"`
-	Listen      string `json:"listen"`
-	Backend     string `json:"backend"`
-	MaxSessions int    `json:"max_sessions"`
-	Decoy       string `json:"decoy"`
-	AdminAddr   string `json:"admin_addr"`
-	AdminToken  string `json:"admin_token"`
+	Tag         string   `json:"tag"`
+	Listen      string   `json:"listen"`
+	Backend     string   `json:"backend"`
+	MaxSessions int      `json:"max_sessions"`
+	Decoy       string   `json:"decoy"`
+	AdminAddr   string   `json:"admin_addr"`
+	AdminToken  string   `json:"admin_token"`
+	// Upstream turns this zhdata inbound into a transparent relay: a
+	// comma-list free array of host:port zhdata upstreams (contract §6).
+	// Empty/absent = ordinary direct backend.
+	Upstream []string `json:"upstream"`
 }
 
 func parseZhdataOptions(options json.RawMessage) (*zhdataOptions, error) {
@@ -201,6 +205,53 @@ func PushZhdataUsers(db *gorm.DB) {
 // and pushes. This is the entry point for the save paths and the cron jobs.
 func PushZhdataUsersLatest() {
 	PushZhdataUsers(database.GetDB())
+}
+
+// PushZhdataRelay sets the transparent-relay state of every zhdata process
+// (contract §6): PUT /v1/relay with the inbound's upstream host:port list.
+// An empty list disables relay and the process serves its direct backend
+// again. Like the user push this is best-effort: an unreachable process only
+// warns, and requires zhdata core >= 0.15.2 (older processes answer 404,
+// which lands in the same warning).
+func PushZhdataRelay(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	inbounds, err := zhdataInbounds(db)
+	if err != nil {
+		logger.Warning("zhdata: could not list zhdata inbounds: ", err)
+		return
+	}
+	for _, inbound := range inbounds {
+		opts, err := parseZhdataOptions(inbound.Options)
+		if err != nil {
+			logger.Warning("zhdata: inbound ", inbound.Tag, " has unreadable options: ", err)
+			continue
+		}
+		if opts.AdminAddr == "" {
+			continue
+		}
+		upstream := opts.Upstream
+		if upstream == nil {
+			upstream = []string{}
+		}
+		body := struct {
+			Upstream []string `json:"upstream"`
+			Enabled  bool     `json:"enabled"`
+		}{Upstream: upstream, Enabled: len(upstream) > 0}
+		response, err := zhdataAdminRequest(opts, http.MethodPut, "/v1/relay", body)
+		if err != nil {
+			logger.Warning("zhdata: push relay to ", inbound.Tag, " (", opts.AdminAddr, ") failed — zhdata process down, admin_addr in use, or core < 0.15.2: ", err)
+			continue
+		}
+		logger.Info("zhdata: relay of ", inbound.Tag, " set to ", len(upstream), " upstream(s): ", strings.TrimSpace(string(response)))
+	}
+}
+
+// PushZhdataRelayLatest is the cron/save-path entry point, mirroring
+// PushZhdataUsersLatest.
+func PushZhdataRelayLatest() {
+	PushZhdataRelay(database.GetDB())
 }
 
 // KickZhdataUser cuts one user's sessions on every zhdata process, next to
