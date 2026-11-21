@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/database"
@@ -426,5 +428,86 @@ func TestPushZhdataRelay(t *testing.T) {
 	}
 	if off.Upstream == nil || len(off.Upstream) != 0 {
 		t.Errorf("plain inbound: upstream = %v, want an explicit empty list", off.Upstream)
+	}
+}
+
+// A uuid reported with devices > 0 refreshes its client's online_at (the same
+// online marker stats.go sets for core sessions); devices == 0 refreshes
+// nothing. A uuid bound to two zhdata inbounds is refreshed exactly once.
+func TestCollectZhdataStatsMarksOnline(t *testing.T) {
+	db := zhdataTestDB(t)
+
+	admin := &fakeZhdataAdmin{}
+	server := httptest.NewServer(admin)
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+
+	// Two zhdata inbounds, one admin process shape, both reporting erin.
+	seedZhdataInbound(t, db, "zhdata-online-a", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`"}`)
+	seedZhdataInbound(t, db, "zhdata-online-b", `{"listen":"","listen_ports":[49889],"admin_addr":"`+addr+`"}`)
+	erin := seedZhdataClient(t, db, "erin", 0, "eeeeeeee-0000-4000-8000-000000000005", []uint{})
+	frank := seedZhdataClient(t, db, "frank", 0, "ffffffff-0000-4000-8000-000000000006", []uint{})
+
+	ForgetZhdataSnapshot("zhdata-online-a")
+	ForgetZhdataSnapshot("zhdata-online-b")
+
+	admin.mu.Lock()
+	admin.stats = `{"ts":1,"sessions_active":1,"users":[` +
+		`{"uuid":"eeeeeeee-0000-4000-8000-000000000005","devices":1,"up":0,"down":0},` +
+		`{"uuid":"ffffffff-0000-4000-8000-000000000006","devices":0,"up":0,"down":0}]}`
+	admin.mu.Unlock()
+
+	updates := 0
+	if err := db.Callback().Update().Before("gorm:update").
+		Register("test:count_updates", func(tx *gorm.DB) { updates++ }); err != nil {
+		t.Fatal(err)
+	}
+
+	CollectZhdataStats()
+
+	// One client row per uuid at most: erin appears on two inbounds but must
+	// be written once; frank (devices == 0, no delta) must not be written.
+	if updates != 1 {
+		t.Errorf("clients written %d times, want exactly 1 (erin only, once)", updates)
+	}
+
+	var stored model.Client
+	if err := db.Where("id = ?", erin.Id).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.OnlineAt == 0 {
+		t.Error("erin online_at not refreshed although devices > 0")
+	}
+	if err := db.Where("id = ?", frank.Id).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.OnlineAt != 0 {
+		t.Errorf("frank online_at = %d, want 0: devices == 0 must not mark online", stored.OnlineAt)
+	}
+
+	// The same sample feeds the panel's online cache (onlines.user /
+	// onlines.inbound -- what the online badges actually read).
+	online := &onlines{}
+	mergeZhdataOnline(online)
+	if !slices.Contains(online.User, "erin") {
+		t.Errorf("online users = %v, want erin listed", online.User)
+	}
+	if slices.Contains(online.User, "frank") {
+		t.Errorf("online users = %v, frank must not be listed", online.User)
+	}
+	for _, tag := range []string{"zhdata-online-a", "zhdata-online-b"} {
+		if !slices.Contains(online.Inbound, tag) {
+			t.Errorf("online inbounds = %v, want %s", online.Inbound, tag)
+		}
+	}
+
+	// A stale overlay (process stopped reporting) marks nobody.
+	zhdataOnlineMu.Lock()
+	zhdataOnlineSampledAt = time.Now().Unix() - zhdataOnlineStaleness - 1
+	zhdataOnlineMu.Unlock()
+	online = &onlines{}
+	mergeZhdataOnline(online)
+	if len(online.User) != 0 || len(online.Inbound) != 0 {
+		t.Errorf("stale overlay merged: users=%v inbounds=%v, want empty", online.User, online.Inbound)
 	}
 }

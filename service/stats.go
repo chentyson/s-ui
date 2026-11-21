@@ -60,6 +60,10 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 	statsMu.Unlock()
 
 	if len(batch) == 0 {
+		// zhdata inbounds are not part of the core's session tracker, so an
+		// all-empty core cycle must still publish their online overlay
+		// (service/zhdata.go).
+		mergeZhdataOnline(online)
 		statsMu.Lock()
 		onlineResources = online
 		statsMu.Unlock()
@@ -83,6 +87,7 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 			// it on the floor.
 			pendingStats = batch
 		} else {
+			mergeZhdataOnline(online)
 			onlineResources = online
 		}
 		statsMu.Unlock()

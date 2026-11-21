@@ -312,8 +312,9 @@ type zhdataStats struct {
 }
 
 type zhdataSnapshotEntry struct {
-	up   int64
-	down int64
+	up      int64
+	down    int64
+	devices int
 }
 
 // zhdataSnapshots is keyed by inbound tag, then uuid. The tag key is what
@@ -324,10 +325,65 @@ var (
 	zhdataSnapshots = map[string]map[string]zhdataSnapshotEntry{}
 )
 
-// CollectZhdataStats samples every zhdata process and credits the per-uuid
-// traffic delta into clients.up/down with gorm.Expr accumulation, matching the
-// stats.go flush semantics. A counter that went down (the zhdata process
-// restarted) resets the snapshot without crediting a negative.
+// zhdataOnline* is the online overlay the stats cron merges into
+// onlineResources (service/stats.go): the panel's online badges (user list,
+// header counts, inbound card marks) read that cache, not clients.online_at.
+// Stale samples are dropped, so a zhdata process that stopped reporting
+// stops marking anyone online. The 45s window is 3 collection cycles.
+const zhdataOnlineStaleness = 45
+
+var (
+	zhdataOnlineMu        sync.Mutex
+	zhdataOnlineSampledAt int64
+	zhdataOnlineUsers     []string // client names
+	zhdataOnlineInbounds  []string // inbound tags with at least one active device
+)
+
+// mergeZhdataOnline folds the overlay into a freshly built onlineResources
+// (called by SaveStats right before it publishes one).
+func mergeZhdataOnline(online *onlines) {
+	zhdataOnlineMu.Lock()
+	defer zhdataOnlineMu.Unlock()
+	if zhdataOnlineSampledAt == 0 || time.Now().Unix()-zhdataOnlineSampledAt > zhdataOnlineStaleness {
+		return
+	}
+	seenUser := make(map[string]bool, len(online.User))
+	for _, name := range online.User {
+		seenUser[name] = true
+	}
+	for _, name := range zhdataOnlineUsers {
+		if !seenUser[name] {
+			seenUser[name] = true
+			online.User = append(online.User, name)
+		}
+	}
+	seenInbound := make(map[string]bool, len(online.Inbound))
+	for _, tag := range online.Inbound {
+		seenInbound[tag] = true
+	}
+	for _, tag := range zhdataOnlineInbounds {
+		if !seenInbound[tag] {
+			seenInbound[tag] = true
+			online.Inbound = append(online.Inbound, tag)
+		}
+	}
+}
+
+// CollectZhdataStats samples every zhdata process and folds the sample into
+// the panel's books, one transaction:
+//   - traffic: per-uuid deltas credited into clients.up/down with gorm.Expr
+//     accumulation (stats.go flush semantics); a counter that went down (the
+//     zhdata process restarted) resets the snapshot without crediting a
+//     negative.
+//   - online: a uuid reported with devices > 0 refreshes its client's
+//     online_at, the same marker stats.go:127 sets for core sessions; the
+//     uuid's client name and the inbound tag are overlaid onto
+//     onlineResources so the panel's online badges see zhdata traffic too.
+//     devices == 0 refreshes nothing -- offline clients keep their last
+//     online_at and age out by the frontend window.
+//
+// A uuid bound to several zhdata inbounds is credited and refreshed exactly
+// once: per-uuid deltas are summed across processes before the write.
 func CollectZhdataStats() {
 	db := database.GetDB()
 	if db == nil {
@@ -338,6 +394,13 @@ func CollectZhdataStats() {
 		logger.Warning("zhdata stats: could not list zhdata inbounds: ", err)
 		return
 	}
+
+	type traffic struct{ up, down int64 }
+	crossTraffic := map[string]*traffic{}
+	onlineUuids := map[string]bool{}
+	var onlineTags []string
+	sampledAny := false
+
 	for _, inbound := range inbounds {
 		opts, err := parseZhdataOptions(inbound.Options)
 		if err != nil || opts.AdminAddr == "" {
@@ -353,6 +416,7 @@ func CollectZhdataStats() {
 			logger.Warning("zhdata stats: ", inbound.Tag, ": unreadable response: ", err)
 			continue
 		}
+		sampledAny = true
 
 		// Dedup within one tag: one uuid can only be reported once per
 		// sample; a duplicate row folds into the first.
@@ -364,6 +428,7 @@ func CollectZhdataStats() {
 			entry := current[user.UUID]
 			entry.up += user.Up
 			entry.down += user.Down
+			entry.devices += user.Devices
 			current[user.UUID] = entry
 		}
 
@@ -372,14 +437,18 @@ func CollectZhdataStats() {
 		zhdataSnapshots[inbound.Tag] = current
 		zhdataStatsMu.Unlock()
 
-		if !existed {
-			// First sample after the panel started (or after the inbound was
-			// (re)created): counters before this point are not the panel's to
-			// credit, unless the process itself started after the panel.
-			continue
-		}
-
+		tagOnline := false
 		for uuid, entry := range current {
+			if entry.devices > 0 {
+				onlineUuids[uuid] = true
+				tagOnline = true
+			}
+			if !existed {
+				// First sample after the panel started (or after the inbound
+				// was (re)created): counters before this point are not the
+				// panel's to credit.
+				continue
+			}
 			upDelta := entry.up - previous[uuid].up
 			downDelta := entry.down - previous[uuid].down
 			if upDelta < 0 {
@@ -391,20 +460,106 @@ func CollectZhdataStats() {
 			if upDelta == 0 && downDelta == 0 {
 				continue
 			}
+			t, ok := crossTraffic[uuid]
+			if !ok {
+				t = &traffic{}
+				crossTraffic[uuid] = t
+			}
+			t.up += upDelta
+			t.down += downDelta
+		}
+		if tagOnline {
+			onlineTags = append(onlineTags, inbound.Tag)
+		}
+	}
+
+	if !sampledAny {
+		// No process answered: the overlay ages out on its own rather than
+		// being stamped with a sample that never happened.
+		return
+	}
+
+	// An all-idle sample (nothing online, no delta) still refreshes the
+	// overlay: the panel then shows nobody from zhdata, instead of clinging
+	// to the previous sample until it ages out.
+	namesByUuid := map[string]string{}
+	onlineUsers := []string{}
+	now := time.Now().Unix()
+
+	if len(onlineUuids) > 0 || len(crossTraffic) > 0 {
+		// uuid -> panel client, one query for the whole cycle.
+		uuids := make([]string, 0, len(onlineUuids)+len(crossTraffic))
+		for uuid := range onlineUuids {
+			uuids = append(uuids, uuid)
+		}
+		for uuid := range crossTraffic {
+			if !onlineUuids[uuid] {
+				uuids = append(uuids, uuid)
+			}
+		}
+		type uuidName struct {
+			UUID string
+			Name string
+		}
+		var resolved []uuidName
+		err = db.Raw("SELECT json_extract(config, '$.zhdata.uuid') AS uuid, name FROM clients WHERE json_extract(config, '$.zhdata.uuid') IN ?", uuids).Scan(&resolved).Error
+		if err != nil {
+			logger.Warning("zhdata stats: could not resolve clients: ", err)
+			return
+		}
+		for _, r := range resolved {
+			namesByUuid[r.UUID] = r.Name
+		}
+
+		tx := db.Begin()
+		var txErr error
+		for _, uuid := range uuids {
 			update := map[string]any{}
-			if upDelta > 0 {
-				update["up"] = gorm.Expr("up + ?", upDelta)
+			if onlineUuids[uuid] {
+				update["online_at"] = now
 			}
-			if downDelta > 0 {
-				update["down"] = gorm.Expr("down + ?", downDelta)
+			if t, ok := crossTraffic[uuid]; ok {
+				if t.up > 0 {
+					update["up"] = gorm.Expr("up + ?", t.up)
+				}
+				if t.down > 0 {
+					update["down"] = gorm.Expr("down + ?", t.down)
+				}
 			}
-			if err := db.Model(model.Client{}).
+			if len(update) == 0 {
+				continue
+			}
+			if txErr = tx.Model(model.Client{}).
 				Where("json_extract(config, '$.zhdata.uuid') = ?", uuid).
-				Updates(update).Error; err != nil {
-				logger.Warning("zhdata stats: failed to credit traffic of ", uuid, " on ", inbound.Tag, ": ", err)
+				Updates(update).Error; txErr != nil {
+				break
+			}
+		}
+		if txErr != nil {
+			tx.Rollback()
+			logger.Warning("zhdata stats: failed to credit traffic/online_at: ", txErr)
+			return
+		}
+		if txErr = tx.Commit().Error; txErr != nil {
+			logger.Warning("zhdata stats: failed to commit traffic/online_at: ", txErr)
+			return
+		}
+
+		onlineUsers = make([]string, 0, len(onlineUuids))
+		seenName := map[string]bool{}
+		for uuid := range onlineUuids {
+			if name, ok := namesByUuid[uuid]; ok && !seenName[name] {
+				seenName[name] = true
+				onlineUsers = append(onlineUsers, name)
 			}
 		}
 	}
+
+	zhdataOnlineMu.Lock()
+	zhdataOnlineUsers = onlineUsers
+	zhdataOnlineInbounds = onlineTags
+	zhdataOnlineSampledAt = now
+	zhdataOnlineMu.Unlock()
 }
 
 // ForgetZhdataSnapshot drops the traffic snapshot of an inbound that is being
