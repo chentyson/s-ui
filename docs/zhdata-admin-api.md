@@ -146,3 +146,19 @@ zhdata 入站可把流量**字节级直通**转发给上游 zhdata（级联出�
   - 懒加载：首个 Dial 才建 `zhdata.Client`（Servers=[server:port]）；出站 Close 释放。
 - **UDP 不支持**：zhdata 无 PacketConn；Network() 只声明 tcp，ListenPacket 返回明确错误 `zhdata outbound: udp not supported`。
 - 库语义（zhdata v0.15.2，已核对）：`DialContext` 等服务端 tOpenAck 才返回；返回的 net.Conn 另实现 `CloseWrite() error`（半关闭透传）；host 可为域名（服务端解析）；`Conns<=0→16`、`Spread<=0→8`；库客户端不监听本地端口，无端口冲突。
+
+## 8. zhdata 入站连接列表（GET /v1/sessions，s-ui v1.6.3-ZY6+ / zhdata core 同步添加）
+
+面板"连接列表"弹窗（Sessions.vue，resource=inbound/user）读内嵌 SessionTracker；zhdata 是 external 进程，核心看不到，改由 admin 面拉取（同一 -admin/-admin-token 鉴权，5s 超时）。
+
+- `GET /v1/sessions` → `{"ts":<unix s>,"sessions":[{"uuid","device"(32hex),"slot":int,"remote":"ip:port","started_at":<unix s>,"relay":bool}]}`。
+  - 条目 = **隧道会话**（uuid+device 的一条 slot），不是每条应用流一条；relay 管道也计入（`relay:true`）。
+  - 无每会话流量计数（uuid 累计在 §1.3 /v1/stats）。
+- 面板映射（service/zhdata.go `zhdataSessions`，对齐 core.SessionInfo/Sessions.vue 字段）：
+  - `id = "<入站tag>:<device>:<slot>"`；`inbound` = 入站 tag；`user` = uuid 反查面板客户 name（查不到显示 uuid）；
+  - `network = "zhdata"`（`relay:true` 的条目把 `rule` 置 `"relay"` 以在 tooltip 显示）；`source` = remote；`destination` = ""（隧道会话无目的地，流由对端解析）；`created_at` = started_at（**秒**，与 tracker 快照 `CreatedAt.Unix()` 同单位）；`up/down` = 0。
+  - 拉取失败/超时：warning + 该入站按空列表处理，不缓存（弹窗自带 5s 自动刷新）。
+- 查询路径（service/stats.go GetSessions）：
+  - `resource=inbound` 且 tag 是 zhdata 入站 → 只查该进程；
+  - `resource=user` 且客户有 config.zhdata.uuid → 遍历全部 zhdata 入站拉取、按 uuid 过滤、与内嵌会话合并去重（按 created_at 倒序）。
+- Close All（StatsService.CloseUserSessions）：先 `POST /v1/users/kick` 全部 zhdata 入站（与内嵌 core 是否在跑无关；kick 语义=断会话/管道，客户端会重连除非已 disable，见 §1.4），再走原有内嵌 CloseByUser/KickUserSessions，行为不变。

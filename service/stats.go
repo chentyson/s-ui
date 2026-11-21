@@ -251,13 +251,50 @@ func (s *StatsService) GetOnlines() (onlines, error) {
 
 // GetSessions lists the live routed connections, narrowed to one user, inbound
 // or outbound. Sorted newest first so the panel shows fresh connections on top.
+//
+// zhdata inbounds are external processes the embedded tracker never sees: a
+// zhdata inbound tag is served from that process' GET /v1/sessions, and a user
+// query folds those in next to the core's own sessions (service/zhdata.go).
 func (s *StatsService) GetSessions(resource string, tag string) ([]core.SessionInfo, error) {
+	switch resource {
+	case "user", "inbound", "outbound", "endpoint":
+	default:
+		return nil, common.NewError("unknown resource: ", resource)
+	}
+
+	sessions := []core.SessionInfo{}
+	if tag != "" {
+		if db := database.GetDB(); db != nil {
+			switch resource {
+			case "inbound":
+				if isZhdataInboundTag(db, tag) {
+					if inbound, err := zhdataInboundByTag(db, tag); err == nil && inbound != nil {
+						sessions = append(sessions, zhdataSessions(db, inbound, "")...)
+					}
+				}
+			case "user":
+				sessions = append(sessions, zhdataSessionsForUser(db, tag)...)
+			}
+		}
+	}
+
+	coreSessions := coreSessionsFiltered(resource, tag)
+	sessions = append(sessions, coreSessions...)
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].CreatedAt > sessions[j].CreatedAt
+	})
+	return sessions, nil
+}
+
+// coreSessionsFiltered is the embedded tracker's view, narrowed the same way
+// as before; a zhdata-only query simply finds nothing there.
+func coreSessionsFiltered(resource string, tag string) []core.SessionInfo {
 	if corePtr == nil || !corePtr.IsRunning() {
-		return []core.SessionInfo{}, nil
+		return nil
 	}
 	box := corePtr.GetInstance()
 	if box == nil {
-		return []core.SessionInfo{}, nil
+		return nil
 	}
 	sessions := box.SessionTracker().Sessions()
 	if tag != "" {
@@ -274,8 +311,6 @@ func (s *StatsService) GetSessions(resource string, tag string) ([]core.SessionI
 			match = func(session core.SessionInfo) bool {
 				return session.Inbound == tag || session.Outbound == tag
 			}
-		default:
-			return nil, common.NewError("unknown resource: ", resource)
 		}
 		filtered := sessions[:0]
 		for _, session := range sessions {
@@ -285,10 +320,7 @@ func (s *StatsService) GetSessions(resource string, tag string) ([]core.SessionI
 		}
 		sessions = filtered
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].CreatedAt > sessions[j].CreatedAt
-	})
-	return sessions, nil
+	return sessions
 }
 
 // CloseUserSessions disconnects a user: every routed connection of theirs is
@@ -299,6 +331,11 @@ func (s *StatsService) CloseUserSessions(user string) error {
 	if user == "" {
 		return common.NewError("empty user name")
 	}
+	// zhdata runs outside the core and cuts its own sessions on request
+	// (docs/zhdata-admin-api.md §1.4): the kick lands whether or not the
+	// embedded core happens to be up, since the zhdata process does not
+	// depend on it. Best-effort, and the embedded part below is unchanged.
+	KickZhdataUser(user)
 	if corePtr == nil || !corePtr.IsRunning() {
 		return common.NewError("core is not running")
 	}
@@ -308,9 +345,6 @@ func (s *StatsService) CloseUserSessions(user string) error {
 	}
 	box.SessionTracker().CloseByUser(user)
 	corePtr.KickUserSessions(user)
-	// zhdata runs outside the core and cuts its own sessions on request
-	// (docs/zhdata-admin-api.md §1.4). Best-effort, next to the core kick.
-	KickZhdataUser(user)
 	return nil
 }
 

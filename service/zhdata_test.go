@@ -209,6 +209,7 @@ type fakeZhdataAdmin struct {
 	kicks    []string
 	relays   []string
 	stats    string
+	sessions string
 	requests int
 }
 
@@ -232,6 +233,8 @@ func (f *fakeZhdataAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/stats":
 		_, _ = w.Write([]byte(f.stats))
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+		_, _ = w.Write([]byte(f.sessions))
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -509,5 +512,166 @@ func TestCollectZhdataStatsMarksOnline(t *testing.T) {
 	mergeZhdataOnline(online)
 	if len(online.User) != 0 || len(online.Inbound) != 0 {
 		t.Errorf("stale overlay merged: users=%v inbounds=%v, want empty", online.User, online.Inbound)
+	}
+}
+
+// The sessions modal for a zhdata inbound reads that process'
+// GET /v1/sessions mapped into core.SessionInfo; a user query folds zhdata
+// sessions in across every zhdata process (contract: uuid/device/slot/remote/
+// started_at/relay).
+func TestZhdataSessionsBridge(t *testing.T) {
+	db := zhdataTestDB(t)
+
+	admin := &fakeZhdataAdmin{}
+	server := httptest.NewServer(admin)
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+
+	seedZhdataInbound(t, db, "zhdata-sess-a", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`"}`)
+	seedZhdataInbound(t, db, "zhdata-sess-b", `{"listen":"","listen_ports":[49889],"admin_addr":"`+addr+`"}`)
+	vless := &model.Inbound{
+		Type: "vless", Tag: "vless-sess",
+		Addrs: json.RawMessage(`[]`), OutJson: json.RawMessage(`{}`),
+		Options: json.RawMessage(`{"listen":"::","listen_port":2096}`),
+	}
+	if err := db.Create(vless).Error; err != nil {
+		t.Fatal(err)
+	}
+	seedZhdataClient(t, db, "gina", 0, "gggggggg-0000-4000-8000-000000000007", []uint{})
+
+	admin.mu.Lock()
+	admin.sessions = `{"ts":9,"sessions":[` +
+		`{"uuid":"gggggggg-0000-4000-8000-000000000007","device":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot":3,"remote":"1.2.3.4:5555","started_at":1732000000,"relay":false},` +
+		`{"uuid":"gggggggg-0000-4000-8000-000000000007","device":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","slot":9,"remote":"5.6.7.8:1","started_at":1732000100,"relay":true},` +
+		`{"uuid":"hhhhhhhh-0000-4000-8000-000000000008","device":"cccccccccccccccccccccccccccccccc","slot":0,"remote":"9.9.9.9:2","started_at":1732000200,"relay":false}]}`
+	admin.mu.Unlock()
+
+	s := &StatsService{}
+
+	// --- inbound query on a zhdata tag ---
+	list, err := s.GetSessions("inbound", "zhdata-sess-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("zhdata inbound sessions = %d, want 3: %+v", len(list), list)
+	}
+	var relay *core.SessionInfo
+	for i := range list {
+		if list[i].Rule == "relay" {
+			relay = &list[i]
+		}
+	}
+	if relay == nil {
+		t.Fatal("relay flag not carried into the mapping")
+	}
+	if relay.ID != "zhdata-sess-a:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:9" {
+		t.Errorf("id = %q, want tag:device:slot", relay.ID)
+	}
+	if relay.Inbound != "zhdata-sess-a" || relay.User != "gina" {
+		t.Errorf("inbound/user = %q/%q, want zhdata-sess-a/gina", relay.Inbound, relay.User)
+	}
+	if relay.Network != "zhdata" {
+		t.Errorf("network = %q, want zhdata", relay.Network)
+	}
+	if relay.Source != "5.6.7.8:1" {
+		t.Errorf("source = %q, want the remote address", relay.Source)
+	}
+	if relay.Destination != "" {
+		t.Errorf("destination = %q, want empty (tunnel sessions have none)", relay.Destination)
+	}
+	// Unit check: createdAt is Unix SECONDS, the unit Sessions.vue's
+	// duration() and the tracker's snapshot use (the task note said
+	// milliseconds; the core is seconds -- zhdata started_at passes as-is).
+	if relay.CreatedAt != 1732000100 {
+		t.Errorf("createdAt = %d, want 1732000100 (seconds)", relay.CreatedAt)
+	}
+	if relay.Upload != 0 || relay.Download != 0 {
+		t.Errorf("up/down = %d/%d, want 0/0 (no per-session counters)", relay.Upload, relay.Download)
+	}
+	// A uuid with no panel client shows the uuid itself.
+	found := false
+	for _, session := range list {
+		if session.User == "hhhhhhhh-0000-4000-8000-000000000008" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("unresolved uuid should be displayed as-is")
+	}
+
+	// --- user query across both zhdata inbounds, merged and filtered ---
+	user, err := s.GetSessions("user", "gina")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// gina has two sessions per process, two processes; the other uuid is
+	// filtered out.
+	if len(user) != 4 {
+		t.Fatalf("gina sessions = %d, want 4 (2 per inbound): %+v", len(user), user)
+	}
+	seen := map[string]bool{}
+	for _, session := range user {
+		if session.User != "gina" {
+			t.Errorf("foreign user in gina's list: %+v", session)
+		}
+		if seen[session.ID] {
+			t.Errorf("duplicate session id %q", session.ID)
+		}
+		seen[session.ID] = true
+	}
+	for _, tag := range []string{"zhdata-sess-a", "zhdata-sess-b"} {
+		count := 0
+		for _, session := range user {
+			if session.Inbound == tag {
+				count++
+			}
+		}
+		if count != 2 {
+			t.Errorf("inbound %s contributed %d sessions, want 2", tag, count)
+		}
+	}
+
+	// --- non-zhdata inbound and unknown resource behave as before ---
+	plain, err := s.GetSessions("inbound", "vless-sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain == nil || len(plain) != 0 {
+		t.Errorf("vless inbound with an unstarted core = %v, want empty list", plain)
+	}
+	if _, err := s.GetSessions("bogus", "x"); err == nil {
+		t.Error("unknown resource must still error")
+	}
+
+	// --- the modal's Close All kicks zhdata even with the core stopped ---
+	admin.mu.Lock()
+	admin.kicks = nil
+	admin.mu.Unlock()
+
+	if err := s.CloseUserSessions("gina"); err == nil {
+		t.Error("CloseUserSessions with an unstarted core must report the core error")
+	}
+	admin.mu.Lock()
+	kicks := append([]string(nil), admin.kicks...)
+	admin.mu.Unlock()
+	if len(kicks) != 2 {
+		t.Fatalf("gina kicks = %v, want one per zhdata inbound (2)", kicks)
+	}
+	for _, body := range kicks {
+		if !strings.Contains(body, "gggggggg-0000-4000-8000-000000000007") {
+			t.Errorf("kick body = %s, want gina's zhdata uuid", body)
+		}
+	}
+
+	// A client without zhdata credentials kicks nobody.
+	db.Create(&model.Client{Name: "plain", Enable: true, Config: json.RawMessage(`{"trojan":{"name":"plain","password":"x"}}`),
+		Inbounds: json.RawMessage(`[]`), Links: json.RawMessage(`[]`)})
+	_ = s.CloseUserSessions("plain")
+	admin.mu.Lock()
+	kicksAfter := len(admin.kicks)
+	admin.mu.Unlock()
+	if kicksAfter != 2 {
+		t.Fatalf("plain client reached the zhdata API: %v", kicksAfter)
 	}
 }

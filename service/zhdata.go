@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
@@ -568,4 +569,160 @@ func ForgetZhdataSnapshot(tag string) {
 	zhdataStatsMu.Lock()
 	delete(zhdataSnapshots, tag)
 	zhdataStatsMu.Unlock()
+}
+
+// ---------------- live sessions (contract: GET /v1/sessions) ----------------
+
+// zhdataSession is one entry of GET /v1/sessions: a live tunnel session
+// (uuid+device on a slot), not one per application stream.
+type zhdataSession struct {
+	UUID      string `json:"uuid"`
+	Device    string `json:"device"`
+	Slot      int    `json:"slot"`
+	Remote    string `json:"remote"`
+	StartedAt int64  `json:"started_at"`
+	Relay     bool   `json:"relay"`
+}
+
+// isZhdataInboundTag reports whether a tag belongs to a zhdata inbound.
+func isZhdataInboundTag(db *gorm.DB, tag string) bool {
+	var count int64
+	if err := db.Model(model.Inbound{}).
+		Where("tag = ? AND type = ?", tag, zhdataType).
+		Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
+}
+
+// zhdataInboundByTag loads one zhdata inbound row by tag.
+func zhdataInboundByTag(db *gorm.DB, tag string) (*model.Inbound, error) {
+	var inbound model.Inbound
+	if err := db.Model(model.Inbound{}).
+		Where("tag = ? AND type = ?", tag, zhdataType).
+		First(&inbound).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &inbound, nil
+}
+
+// zhdataNamesForUUIDs maps zhdata uuids to panel client names in one query.
+// uuids with no client (deleted row, external keysource entry) stay absent.
+func zhdataNamesForUUIDs(db *gorm.DB, uuids []string) map[string]string {
+	names := map[string]string{}
+	if len(uuids) == 0 {
+		return names
+	}
+	type uuidName struct {
+		UUID string
+		Name string
+	}
+	var resolved []uuidName
+	if err := db.Raw("SELECT json_extract(config, '$.zhdata.uuid') AS uuid, name FROM clients WHERE json_extract(config, '$.zhdata.uuid') IN ?", uuids).Scan(&resolved).Error; err != nil {
+		logger.Warning("zhdata: could not resolve client names: ", err)
+		return names
+	}
+	for _, r := range resolved {
+		names[r.UUID] = r.Name
+	}
+	return names
+}
+
+// zhdataSessions fetches one zhdata process' live sessions and maps them to
+// the panel's SessionInfo shape. filterUUID, when set, narrows to one client
+// before mapping. A failed pull warns and counts as empty (the panel's
+// sessions modal refreshes on its own; no caching here).
+func zhdataSessions(db *gorm.DB, inbound *model.Inbound, filterUUID string) []core.SessionInfo {
+	opts, err := parseZhdataOptions(inbound.Options)
+	if err != nil || opts.AdminAddr == "" {
+		return nil
+	}
+	response, err := zhdataAdminRequest(opts, http.MethodGet, "/v1/sessions", nil)
+	if err != nil {
+		logger.Warning("zhdata sessions: ", inbound.Tag, " (", opts.AdminAddr, "): ", err)
+		return nil
+	}
+	var payload struct {
+		Ts       int64           `json:"ts"`
+		Sessions []zhdataSession `json:"sessions"`
+	}
+	if err := json.Unmarshal(response, &payload); err != nil {
+		logger.Warning("zhdata sessions: ", inbound.Tag, ": unreadable response: ", err)
+		return nil
+	}
+	if filterUUID != "" {
+		kept := payload.Sessions[:0]
+		for _, session := range payload.Sessions {
+			if session.UUID == filterUUID {
+				kept = append(kept, session)
+			}
+		}
+		payload.Sessions = kept
+	}
+	if len(payload.Sessions) == 0 {
+		return nil
+	}
+
+	uuids := make([]string, 0, len(payload.Sessions))
+	for _, session := range payload.Sessions {
+		if session.UUID != "" {
+			uuids = append(uuids, session.UUID)
+		}
+	}
+	names := zhdataNamesForUUIDs(db, uuids)
+
+	// core.SessionInfo shape (what Sessions.vue renders): a tunnel session
+	// has no destination of its own (application streams ride it and the
+	// zhdata server resolves them), so destination stays "" and per-session
+	// counters are 0 -- the uuid's totals come from /v1/stats. CreatedAt is
+	// Unix seconds, the unit the tracker's snapshot uses.
+	info := make([]core.SessionInfo, 0, len(payload.Sessions))
+	for _, session := range payload.Sessions {
+		user := names[session.UUID]
+		if user == "" {
+			user = session.UUID
+		}
+		entry := core.SessionInfo{
+			ID:        fmt.Sprintf("%s:%s:%d", inbound.Tag, session.Device, session.Slot),
+			Inbound:   inbound.Tag,
+			User:      user,
+			Network:   "zhdata",
+			Source:    session.Remote,
+			CreatedAt: session.StartedAt,
+		}
+		if session.Relay {
+			entry.Rule = "relay"
+		}
+		info = append(info, entry)
+	}
+	return info
+}
+
+// zhdataSessionsForUser pulls the live sessions of every zhdata process for
+// one panel client, merged. A client without zhdata credentials gets nothing.
+func zhdataSessionsForUser(db *gorm.DB, name string) []core.SessionInfo {
+	if name == "" {
+		return nil
+	}
+	var uuid string
+	if err := db.Raw("SELECT json_extract(config, '$.zhdata.uuid') FROM clients WHERE name = ?", name).Scan(&uuid).Error; err != nil {
+		logger.Warning("zhdata sessions: could not resolve uuid of client ", name, ": ", err)
+		return nil
+	}
+	if uuid == "" {
+		return nil
+	}
+	inbounds, err := zhdataInbounds(db)
+	if err != nil {
+		logger.Warning("zhdata sessions: could not list zhdata inbounds: ", err)
+		return nil
+	}
+	var sessions []core.SessionInfo
+	for _, inbound := range inbounds {
+		sessions = append(sessions, zhdataSessions(db, inbound, uuid)...)
+	}
+	return sessions
 }
