@@ -104,6 +104,12 @@ func (h *Outbound) ensureClient() (*zhdatacore.Client, error) {
 			UUID:    h.options.UUID,
 			Conns:   h.options.Conns,
 			Spread:  h.options.Spread,
+			// Auto download pool (conns/2 dedicated download sessions),
+			// matching the standalone zhdata client: leaving it unset
+			// takes the shared pool (0) and makes panel outbounds behave
+			// differently from the zhenhanvn path under bandwidth
+			// pressure.
+			DLPool: -1,
 			// Logs from the tunnel land in the panel log, at debug: the
 			// handshake retries of an unreachable server would otherwise
 			// spam the panel.

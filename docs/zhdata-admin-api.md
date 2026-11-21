@@ -142,6 +142,7 @@ zhdata 入站可把流量**字节级直通**转发给上游 zhdata（级联出�
   - `uuid`：出站自己的凭据（与面板客户无关；不需要 users 推送——它是客户端侧）。
   - `device_id` 不出现在配置里：出站实例懒加载 `zhdata.NewClient` 时 DeviceID=nil（本机随机、进程存续期稳定）。
   - `conns/spread` 透传 zhdata ClientConfig；0=核心默认。`connect_timeout`（badoption.Duration）作用于 DialContext（调用方已有 deadline 时不覆盖）。
+  - `DLPool` 面板侧固定传 **-1**（auto：conns/2 条下载专用会话），与 standalone CLI/zhenhanvn 默认行为一致；不设则 0=共享池，下载吞吐路径不同。`SlotBase/Train` 不设=0（关），与 CLI 默认一致。
   - 懒加载：首个 Dial 才建 `zhdata.Client`（Servers=[server:port]）；出站 Close 释放。
 - **UDP 不支持**：zhdata 无 PacketConn；Network() 只声明 tcp，ListenPacket 返回明确错误 `zhdata outbound: udp not supported`。
 - 库语义（zhdata v0.15.2，已核对）：`DialContext` 等服务端 tOpenAck 才返回；返回的 net.Conn 另实现 `CloseWrite() error`（半关闭透传）；host 可为域名（服务端解析）；`Conns<=0→16`、`Spread<=0→8`；库客户端不监听本地端口，无端口冲突。
