@@ -210,6 +210,7 @@ type fakeZhdataAdmin struct {
 	relays   []string
 	stats    string
 	sessions string
+	version  string
 	queries  []string
 	requests int
 }
@@ -237,6 +238,11 @@ func (f *fakeZhdataAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 		f.queries = append(f.queries, r.URL.RawQuery)
 		_, _ = w.Write([]byte(f.sessions))
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/version":
+		if f.version == "" {
+			f.version = `{"ok":true,"version":"0.15.4"}`
+		}
+		_, _ = w.Write([]byte(f.version))
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -253,9 +259,14 @@ func TestPushZhdataUsers(t *testing.T) {
 	addr := strings.TrimPrefix(server.URL, "http://")
 
 	seedZhdataInbound(t, db, "zhdata-in", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`","admin_token":"sekret"}`)
-	seedZhdataClient(t, db, "alice", 2, "aaaaaaaa-0000-4000-8000-000000000001", []uint{})
+	alice := seedZhdataClient(t, db, "alice", 2, "aaaaaaaa-0000-4000-8000-000000000001", []uint{})
 	seedZhdataClient(t, db, "bob", 0, "bbbbbbbb-0000-4000-8000-000000000002", []uint{})
-	// No zhdata credentials: not pushable.
+	// The plan fields the tunnel query answers with come off the client row.
+	if err := db.Model(model.Client{}).Where("id = ?", alice.Id).
+		Updates(map[string]any{"expiry": 1780000000, "volume": 107374182400, "up": 1000, "down": 2500}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// A client without zhdata credentials: not pushable.
 	db.Create(&model.Client{Name: "plain", Enable: true, Config: json.RawMessage(`{"trojan":{"name":"plain","password":"x"}}`),
 		Inbounds: json.RawMessage(`[]`), Links: json.RawMessage(`[]`)})
 
@@ -270,6 +281,9 @@ func TestPushZhdataUsers(t *testing.T) {
 		Users []struct {
 			UUID       string `json:"uuid"`
 			MaxDevices int    `json:"max_devices"`
+			Expiry     int64  `json:"expiry"`
+			Quota      int64  `json:"quota"`
+			Used       int64  `json:"used"`
 		} `json:"users"`
 		Authorization string
 	}
@@ -285,13 +299,161 @@ func TestPushZhdataUsers(t *testing.T) {
 			if u.MaxDevices != 2 {
 				t.Errorf("alice max_devices = %d, want 2 (her devs column)", u.MaxDevices)
 			}
+			if u.Expiry != 1780000000 || u.Quota != 107374182400 || u.Used != 3500 {
+				t.Errorf("alice plan fields = expiry %d quota %d used %d, want 1780000000 / 107374182400 / 3500 (up+down)", u.Expiry, u.Quota, u.Used)
+			}
 		case "bbbbbbbb-0000-4000-8000-000000000002":
 			if u.MaxDevices != 0 {
 				t.Errorf("bob max_devices = %d, want 0 (no limit)", u.MaxDevices)
 			}
+			if u.Expiry != 0 || u.Quota != 0 || u.Used != 0 {
+				t.Errorf("bob plan fields = %+v, want all zero (no limit set)", u)
+			}
 		default:
 			t.Errorf("unexpected uuid pushed: %q", u.UUID)
 		}
+	}
+}
+
+// A client that leaves the pushed set (deleted, disabled, credentials
+// replaced) keeps its live tunnels unless the panel cuts them: the core only
+// rejects NEW connections on a key miss (contract §1.4).
+func TestPushZhdataUsersKicksDepartedClient(t *testing.T) {
+	db := zhdataTestDB(t)
+	admin := &fakeZhdataAdmin{}
+	server := httptest.NewServer(admin)
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+
+	seedZhdataInbound(t, db, "zhdata-kick", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`"}`)
+	alice := seedZhdataClient(t, db, "alice", 0, "aaaaaaaa-0000-4000-8000-000000000001", []uint{})
+	seedZhdataClient(t, db, "bob", 0, "bbbbbbbb-0000-4000-8000-000000000002", []uint{})
+
+	// The first push for this tag has no previous set: nobody is kicked.
+	PushZhdataUsers(db)
+	admin.mu.Lock()
+	firstKicks := len(admin.kicks)
+	admin.mu.Unlock()
+	if firstKicks != 0 {
+		t.Fatalf("first push kicked %d client(s), want 0", firstKicks)
+	}
+
+	if err := db.Model(model.Client{}).Where("id = ?", alice.Id).Update("enable", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	PushZhdataUsers(db)
+
+	admin.mu.Lock()
+	defer admin.mu.Unlock()
+	if len(admin.kicks) != 1 {
+		t.Fatalf("expected one kick after alice left the set, got %d: %v", len(admin.kicks), admin.kicks)
+	}
+	if !strings.Contains(admin.kicks[0], "aaaaaaaa-0000-4000-8000-000000000001") {
+		t.Fatalf("kick body = %s, want alice's zhdata uuid", admin.kicks[0])
+	}
+}
+
+// The health view is what turns those warnings into something the panel UI can
+// show: reachability, the core version, the key count it reports against what
+// the panel has, and each -users source with the error it failed with.
+func TestGetZhdataHealth(t *testing.T) {
+	db := zhdataTestDB(t)
+	admin := &fakeZhdataAdmin{
+		stats: `{"ts":1,"sessions_active":0,"keys_total":3,"user_sources":[` +
+			`{"path":"/opt/zhdata/users.txt","keys":1,"at":100},` +
+			`{"path":"/etc/s-ui/private/s-ui.db","keys":0,"last_error":"no such file or directory","at":100}]}`,
+	}
+	server := httptest.NewServer(admin)
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+
+	seedZhdataInbound(t, db, "zhdata-health", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`"}`)
+	seedZhdataClient(t, db, "alice", 0, "aaaaaaaa-0000-4000-8000-000000000001", []uint{})
+	seedZhdataClient(t, db, "bob", 0, "bbbbbbbb-0000-4000-8000-000000000002", []uint{})
+
+	// The stats cycle is the free reachability + source probe (15s cron).
+	CollectZhdataStats()
+
+	health := GetZhdataHealth()
+	if len(health) != 1 {
+		t.Fatalf("want one zhdata inbound, got %d", len(health))
+	}
+	h := health[0]
+	if !h.Reachable {
+		t.Fatalf("core reported unreachable: %s", h.LastError)
+	}
+	if h.Version == "" {
+		t.Error("core version not probed; the UI has nothing to show")
+	}
+	if h.PanelUsers != 2 {
+		t.Errorf("panelUsers = %d, want 2", h.PanelUsers)
+	}
+	if h.CoreKeys != 3 {
+		t.Errorf("coreKeys = %d, want the 3 the core reported", h.CoreKeys)
+	}
+	if len(h.Sources) != 2 {
+		t.Fatalf("want both user sources listed, got %+v", h.Sources)
+	}
+	var broken *ZhdataUserSource
+	for i, s := range h.Sources {
+		if s.Path == "/etc/s-ui/private/s-ui.db" {
+			broken = &h.Sources[i]
+		}
+	}
+	if broken == nil || broken.LastError == "" {
+		t.Fatalf("the unreadable sqlite source lost its error: %+v", h.Sources)
+	}
+	found := false
+	for _, w := range h.Warnings {
+		if w.Code == "user_source" && strings.Contains(w.Detail, "s-ui.db") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no user_source warning for a broken -users path: %+v", h.Warnings)
+	}
+}
+
+// A zhdata process that is down has to be visible the same way, with the reason
+// the last call failed instead of a silently missing card.
+func TestGetZhdataHealthUnreachableProcess(t *testing.T) {
+	db := zhdataTestDB(t)
+	server := httptest.NewServer(&fakeZhdataAdmin{})
+	addr := strings.TrimPrefix(server.URL, "http://")
+	server.Close()
+
+	seedZhdataInbound(t, db, "zhdata-down", `{"listen":"","listen_ports":[49888],"admin_addr":"`+addr+`"}`)
+	seedZhdataClient(t, db, "alice", 0, "aaaaaaaa-0000-4000-8000-000000000001", []uint{})
+
+	CollectZhdataStats()
+	health := GetZhdataHealth()
+	if len(health) != 1 {
+		t.Fatalf("want one zhdata inbound, got %d", len(health))
+	}
+	h := health[0]
+	if h.Reachable {
+		t.Fatal("a closed admin endpoint must read as unreachable")
+	}
+	if h.LastError == "" || h.LastErrAt == 0 {
+		t.Errorf("no last error recorded: %+v", h)
+	}
+	down := false
+	for _, w := range h.Warnings {
+		if w.Code == "down" {
+			down = true
+		}
+	}
+	if !down {
+		t.Errorf("no down warning: %+v", h.Warnings)
+	}
+	// Deleting the inbound drops the record, so the panel stops reporting a
+	// process that no longer exists (the delete path calls ForgetZhdataSnapshot).
+	if err := db.Where("tag = ?", "zhdata-down").Delete(&model.Inbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	ForgetZhdataSnapshot("zhdata-down")
+	if again := GetZhdataHealth(); len(again) != 0 {
+		t.Fatalf("health of a deleted inbound still listed: %+v", again)
 	}
 }
 
@@ -355,6 +517,15 @@ func TestCollectZhdataStatsCreditsDeltas(t *testing.T) {
 	}
 }
 
+// snapshotKicks copies what the fake was asked to kick. The handler holds the
+// mutex per request, so a test that checks twice in a row cannot just Lock()
+// again -- sync.Mutex is not reentrant and would hang the test binary.
+func (f *fakeZhdataAdmin) snapshotKicks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.kicks...)
+}
+
 // The kick reaches every zhdata process with the client's uuid.
 func TestKickZhdataUser(t *testing.T) {
 	db := zhdataTestDB(t)
@@ -369,13 +540,12 @@ func TestKickZhdataUser(t *testing.T) {
 
 	KickZhdataUser("dave")
 
-	admin.mu.Lock()
-	defer admin.mu.Unlock()
-	if len(admin.kicks) != 1 {
-		t.Fatalf("expected one kick, got %v", admin.kicks)
+	kicks := admin.snapshotKicks()
+	if len(kicks) != 1 {
+		t.Fatalf("expected one kick, got %v", kicks)
 	}
-	if !strings.Contains(admin.kicks[0], "dddddddd-0000-4000-8000-000000000004") {
-		t.Errorf("kick payload = %s, want the client's zhdata uuid", admin.kicks[0])
+	if !strings.Contains(kicks[0], "dddddddd-0000-4000-8000-000000000004") {
+		t.Errorf("kick payload = %s, want the client's zhdata uuid", kicks[0])
 	}
 
 	// A client without zhdata credentials must not hit the API at all.
@@ -383,10 +553,8 @@ func TestKickZhdataUser(t *testing.T) {
 		Inbounds: json.RawMessage(`[]`), Links: json.RawMessage(`[]`)})
 	KickZhdataUser("plain")
 
-	admin.mu.Lock()
-	defer admin.mu.Unlock()
-	if len(admin.kicks) != 1 {
-		t.Fatalf("plain client kick reached the API: %v", admin.kicks)
+	if kicks := admin.snapshotKicks(); len(kicks) != 1 {
+		t.Fatalf("plain client kick reached the API: %v", kicks)
 	}
 }
 
@@ -483,11 +651,12 @@ func TestCollectZhdataStatsMarksOnline(t *testing.T) {
 	if stored.OnlineAt == 0 {
 		t.Error("erin online_at not refreshed although devices > 0")
 	}
-	if err := db.Where("id = ?", frank.Id).First(&stored).Error; err != nil {
+	var frankRow model.Client
+	if err := db.Where("id = ?", frank.Id).First(&frankRow).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stored.OnlineAt != 0 {
-		t.Errorf("frank online_at = %d, want 0: devices == 0 must not mark online", stored.OnlineAt)
+	if frankRow.OnlineAt != 0 {
+		t.Errorf("frank online_at = %d, want 0: devices == 0 must not mark online", frankRow.OnlineAt)
 	}
 
 	// The same sample feeds the panel's online cache (onlines.user /

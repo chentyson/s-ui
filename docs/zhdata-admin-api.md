@@ -33,6 +33,7 @@ JSON 端点（全部 `Content-Type: application/json`）：
 语义：
 - 替换的是 **"API 用户集"**；与文件/sqlite 来源 **取并集**（保持 c498 现有 users.txt 用法不破坏）。
 - `max_devices`：0=不限；策略合并规则：**API 优先于文件**（覆盖同名 uuid）。
+- `expiry/quota/used`（**zhdata ≥0.15.4 增量字段**，面板取自 clients.expiry / volume / up+down）：核心把它作为该 uuid 的套餐记录，用于隧道内套餐查询（客户端在隧道里请求 `query.zhdata`）。三个字段**全 0 = 面板没有该信息**，此时核心**保留**文件/sqlite 源里的同名记录，不抹掉。
 - 空数组 `{"users":[]}` = 清空 API 用户集（不影响文件源）。
 - 返回 `{"ok":true,"keys":N}`；zhdata 在内存原子上换表，正在会话按现有 reject/kick 语义处理（被移除的 uuid 新连接拒绝；已有会话不强制断，除非另行 kick）。
 
@@ -41,6 +42,11 @@ JSON 端点（全部 `Content-Type: application/json`）：
 {
   "ts": 1732100000,
   "sessions_active": 137,
+  "keys_total": 3,
+  "user_sources": [
+    {"path":"/opt/zhdata/users.txt","keys":1,"last_error":"","at":1795350000},
+    {"path":"/etc/s-ui/private/s-ui.db","keys":0,"last_error":"no such file or directory","at":1795350000}
+  ],
   "users": [
     {"uuid":"abc...","devices":2,"up":102400,"down":988172}
   ]
@@ -48,6 +54,7 @@ JSON 端点（全部 `Content-Type: application/json`）：
 ```
 - `devices` = 当前活跃 device_id 数（与 max_devices 同一计数）。
 - `up/down` = 该 uuid 隧道字节累计（pumpUp/pumpDown 计数器）。s-ui 侧按周期采样求增量，语义与面板 SessionTracker flush 一致。
+- `keys_total` / `user_sources`（**zhdata ≥0.15.4 增量字段**，老核心不返回）：有效 key 集大小；以及 `-users` 每个源「最后一次成功加载贡献几个 key」「最后一次尝试的时间与错误」。这是把「用户库路径写错」这类只进 journald 的告警变成面板可见的唯一途径（面板 §2.5）。
 
 ### 1.4 `POST /v1/users/kick` — 切断指定用户全部会话
 ```json
@@ -56,6 +63,7 @@ JSON 端点（全部 `Content-Type: application/json`）：
 返回 `{"kicked":N}`。uuid 为空字符串 = 踢所有 API/文件用户中被点名者（P0 只要求按 uuid 踢）。
 
 ### 1.5 `POST /v1/reload`（可选 P1）— 强制立即重载文件用户源。
+返回 `{"ok":true,"keys":N,"user_sources":[…同 §1.3…]}`（`user_sources` 为 zhdata ≥0.15.4 增量字段），运维一行 curl 就能核对用户库配置。
 
 ## 2. s-ui 侧：zhdata 入站（external type）
 
@@ -80,6 +88,15 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - users 推送触发点 = 现有 addUsers/UpdateInboundsUsers/client enable-disable 全部路径：把面板全部启用客户（uuid + max_devices=面板设备数限额）`PUT /v1/users`。
 - 统计：新 cron（15s）`GET /v1/stats` → 按 uuid 增量累加进 clients.up/down（与 stats.go flush 合并语义）→ DepleteClients 超额自动 disable → 用户从 zhdata users 推送中消失。
 - Kick：面板 Kick 用户时并列调 `POST /v1/users/kick`。
+- 套餐字段：users 推送除 uuid+max_devices 外带上 `expiry=clients.expiry`、`quota=clients.volume`、`used=clients.up+down`（zhdata ≥0.15.4 用它们在隧道内回答套餐查询，见核心接口文档 §3.8）。因此 `resetTraffic`（清零 up/down、重新启用客户）也要补一次推送，否则核心最多滞后 1 分钟。
+- 离开集合自动 kick：面板对比前后两次推送的 uuid 集，对被删除/禁用/换凭据的客户自动 `POST /v1/users/kick`（核心只对**新**连接做 key miss，不断已有隧道）。首次推送（面板刚启动）不踢任何人；入站删除时清掉该 tag 的前后快照。
+
+### 2.5 健康可见性（面板 UI 能看到核心异常）
+所有 admin 调用同时是健康采样（`service/zhdata.go` 的按 tag 记录：可达性、核心版本、推送数 vs 面板客户数、核心 key 数、每个 `-users` 源的 key 数与最后一次错误）：
+
+- `GET api/zhdataHealth` → 每个 zhdata 入站一条；同一份数据挂在 `api/load` 的 `zhdataHealth` 字段上（搭 10s 轮询，不额外发请求）。版本探测有 5 分钟节流，且刚失败的进程不再探（避免面板轮询被 5s 超时拖住）。
+- 前端：入站卡片上 zhdata 一条状态 chip（正常=版本+推送数；异常=红色，tooltip 逐条列出 warning、`admin_addr`、最后一次错误、每个用户源 `path → keys`（带该源错误）与 `pushed/panel/core` 数量对比）；顶栏复用 maintenance chip 做全局「zhdata: K/N 异常」。
+- warning 代码：`down`（进程不可达）、`user_source`（某用户源读取失败，例如 sqlite 路径写错）、`key_mismatch`（核心 key 数 < 面板客户数）、`bad_options` / `no_admin_addr`（入站本身配错）。
 
 ## 3. 客户凭据形状（clients.config.zhdata）
 
@@ -104,6 +121,9 @@ JSON 端点（全部 `Content-Type: application/json`）：
 3. 该客户再订一个 hysteria2 入站：面板设备数限额 2 → 两协议合计同时只允许 2 台（面板内嵌协议精确；zhdata 侧按推送 max_devices 独立限）。
 4. 面板流量列 = hysteria2 流量 + zhdata 流量之和；15s 刷新；超额 DepleteClients 后 zhdata 新连接被拒。
 5. 面板 Kick → zhdata 会话被切（日志出现 reject）。
+6. 面板改客户到期日/流量包 → 客户端在隧道里查套餐立即（保存后推送）反映，无需等 1 分钟。
+7. 把 zhdata 的 `-users` 指到一个不存在的 sqlite 路径 → 面板顶栏出现 zhdata 异常 chip，入站卡片 tooltip 里能看到「该用户源读取失败」而不必 ssh 看 journald。
+8. 面板禁用/删除客户 → 该客户的 zhdata 隧道被切（自动 kick），新连接被拒。
 
 ## 6. zhdata 入站 transparent relay（zhdata→zhdata 透明转发，s-ui v1.6.3-ZY6+ / zhdata core ≥0.15.2）
 

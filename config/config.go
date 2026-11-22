@@ -38,7 +38,11 @@ const (
 //	     （core/usersession 全局设备表，TryBind 跨入站合计）
 //	ZY6  zhdata 出站（内嵌 box 注册 core/protocol/zhdata，依赖 zhdata v0.15.2 库化）+
 //	     zhdata 入站 transparent relay（options.upstream → PUT /v1/relay）
-const VersionSuffix = "ZY6"
+//	ZY7  zhdata 健康可见性：admin 调用即健康采样 → GET api/zhdataHealth（并挂在
+//	     api/load 上），前端入站卡片 chip + 顶栏告警 chip；PUT /v1/users 附带
+//	     expiry/quota/used（隧道内套餐查询走面板值）；对离开用户集的客户自动 kick；
+//	     resetTraffic 后补推送；fetchUsers 跳过无该协议凭据的客户（NULL 不再炸掉配置）
+const VersionSuffix = "ZY7"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

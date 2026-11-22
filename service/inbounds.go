@@ -281,10 +281,15 @@ func (s *InboundService) fetchUsers(db *gorm.DB, inboundType string, condition s
 
 	var users []string
 
+	// The IS NOT NULL guard is not cosmetic: a client subscribed to an inbound
+	// it holds no credentials for (a zhdata-only client on a vless inbound, a
+	// stale subscription after an edit) extracts to NULL, and scanning NULL
+	// into a string aborts the whole config build -- one bad row would keep
+	// every inbound from starting.
 	err := db.Raw(
 		fmt.Sprintf(`SELECT json_extract(clients.config, "$.%s")
-		FROM clients WHERE enable = true AND %s`,
-			inboundType, condition)).Scan(&users).Error
+		FROM clients WHERE enable = true AND %s AND json_extract(clients.config, "$.%s") IS NOT NULL`,
+			inboundType, condition, inboundType)).Scan(&users).Error
 	if err != nil {
 		return nil, err
 	}

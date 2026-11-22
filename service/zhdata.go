@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,26 +122,41 @@ func zhdataAdminRequest(opts *zhdataOptions, method string, path string, body an
 }
 
 // zhdataAdminUsers is one entry of the PUT /v1/users payload.
+//
+// Expiry/Quota/Used are the optional account fields of the same contract
+// (docs/zhdata-admin-api.md §1.2, zhdata >= 0.15.4): they are what the core
+// answers when a client asks its tunnel for its plan (到期日 / 流量限额).
+// Zero means "the panel carries no such limit", and zhdata then leaves any
+// record from its own file/sqlite sources intact rather than erasing it.
 type zhdataAdminUsers struct {
 	UUID       string `json:"uuid"`
 	MaxDevices int    `json:"max_devices"`
+	Expiry     int64  `json:"expiry"`
+	Quota      int64  `json:"quota"`
+	Used       int64  `json:"used"`
 }
 
 // zhdataEnabledUsers reads the clients every zhdata process should serve:
 // every enabled client with a config.zhdata.uuid, carrying the same device
-// limit the panel feeds to devlimit (`devs`, 0 = no limit).
+// limit the panel feeds to devlimit (`devs`, 0 = no limit) and the account
+// fields the plan query answers with (expiry / volume / up+down).
 func zhdataEnabledUsers(db *gorm.DB) ([]zhdataAdminUsers, error) {
 	type row struct {
 		UUID       string
 		MaxDevices int
+		Expiry     int64
+		Volume     int64
+		Up         int64
+		Down       int64
 	}
 	var rows []row
 	const base = "FROM clients WHERE clients.enable = true AND json_extract(clients.config, '$.zhdata.uuid') IS NOT NULL"
-	err := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, COALESCE(clients.devs, 0) AS max_devices " + base).Scan(&rows).Error
+	const account = "COALESCE(clients.expiry, 0) AS expiry, COALESCE(clients.volume, 0) AS volume, COALESCE(clients.up, 0) AS up, COALESCE(clients.down, 0) AS down"
+	err := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, COALESCE(clients.devs, 0) AS max_devices, "+account+" "+base).Scan(&rows).Error
 	if err != nil {
 		// A database that predates the devs column still has usable users.
 		rows = nil
-		if err2 := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, 0 AS max_devices " + base).Scan(&rows).Error; err2 != nil {
+		if err2 := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, 0 AS max_devices "+base).Scan(&rows).Error; err2 != nil {
 			return nil, err
 		}
 	}
@@ -149,7 +165,13 @@ func zhdataEnabledUsers(db *gorm.DB) ([]zhdataAdminUsers, error) {
 		if r.UUID == "" {
 			continue
 		}
-		users = append(users, zhdataAdminUsers{UUID: r.UUID, MaxDevices: r.MaxDevices})
+		users = append(users, zhdataAdminUsers{
+			UUID:       r.UUID,
+			MaxDevices: r.MaxDevices,
+			Expiry:     r.Expiry,
+			Quota:      r.Volume,
+			Used:       r.Up + r.Down,
+		})
 	}
 	return users, nil
 }
@@ -191,6 +213,7 @@ func PushZhdataUsers(db *gorm.DB) {
 			body.Users = []zhdataAdminUsers{}
 		}
 		response, err := zhdataAdminRequest(opts, http.MethodPut, "/v1/users", body)
+		noteZhdataPush(inbound.Tag, opts.AdminAddr, len(users), response, err)
 		if err != nil {
 			// A failure here is expected to be loud: an unreachable admin
 			// usually means the zhdata process is down, or its admin_addr
@@ -200,6 +223,19 @@ func PushZhdataUsers(db *gorm.DB) {
 			continue
 		}
 		logger.Info("zhdata: pushed ", len(users), " user(s) to ", inbound.Tag, ": ", strings.TrimSpace(string(response)))
+		// A uuid that dropped out of the set (deleted, disabled, credentials
+		// replaced) keeps its live tunnels unless the panel cuts them, because
+		// the core only rejects new connections on a key miss (contract §1.4).
+		for _, uuid := range zhdataMissingUsers(inbound.Tag, users) {
+			kickBody := struct {
+				UUID string `json:"uuid"`
+			}{UUID: uuid}
+			if _, err := zhdataAdminRequest(opts, http.MethodPost, "/v1/users/kick", kickBody); err != nil {
+				logger.Warning("zhdata: kick of departed uuid ", uuid, " on ", inbound.Tag, " failed: ", err)
+				continue
+			}
+			logger.Info("zhdata: kicked departed uuid ", uuid, " on ", inbound.Tag)
+		}
 	}
 }
 
@@ -242,6 +278,7 @@ func PushZhdataRelay(db *gorm.DB) {
 			Enabled  bool     `json:"enabled"`
 		}{Upstream: upstream, Enabled: len(upstream) > 0}
 		response, err := zhdataAdminRequest(opts, http.MethodPut, "/v1/relay", body)
+		noteZhdataSample(inbound.Tag, opts.AdminAddr, "relay", err)
 		if err != nil {
 			logger.Warning("zhdata: push relay to ", inbound.Tag, " (", opts.AdminAddr, ") failed — zhdata process down, admin_addr in use, or core < 0.15.2: ", err)
 			continue
@@ -298,6 +335,282 @@ func KickZhdataUser(user string) {
 	}
 }
 
+// --- process health (docs/zhdata-admin-api.md §1.3/§2) ---
+//
+// Every admin API call the panel makes is a health sample, and until now the
+// outcome of one only ever reached journald. Keeping the last outcome per
+// inbound tag is what lets the UI say "this zhdata process is down" or "its
+// -users source cannot be read" instead of leaving the operator to grep.
+
+// ZhdataUserSource is one -users source of a zhdata process: how many keys it
+// yielded at the last load and why it failed. A wrong sqlite path shows up here
+// with its error -- otherwise invisible, because the process keeps running on
+// the sources that did load.
+type ZhdataUserSource struct {
+	Path      string `json:"path"`
+	Keys      int    `json:"keys"`
+	LastError string `json:"lastError,omitempty"`
+	At        int64  `json:"at,omitempty"`
+}
+
+// ZhdataWarning is one reason the panel wants the operator to look. The code is
+// for translation, detail is the sentence to fall back to.
+type ZhdataWarning struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+// ZhdataHealth is the panel's picture of one zhdata process, assembled from
+// the admin calls that happen anyway (push, relay, the 15s stats sample).
+type ZhdataHealth struct {
+	Tag         string             `json:"tag"`
+	AdminAddr   string             `json:"adminAddr"`
+	Reachable   bool               `json:"reachable"`
+	Version     string             `json:"version,omitempty"`
+	PushedUsers int                `json:"pushedUsers"`
+	PanelUsers  int                `json:"panelUsers"`
+	CoreKeys    int                `json:"coreKeys"`
+	Sources     []ZhdataUserSource `json:"userSources,omitempty"`
+	LastError   string             `json:"lastError,omitempty"`
+	LastOkAt    int64              `json:"lastOkAt,omitempty"`
+	LastErrAt   int64              `json:"lastErrAt,omitempty"`
+	Warnings    []ZhdataWarning    `json:"warnings,omitempty"`
+
+	// versionAt is when the core version was last read; it is not part of the
+	// panel API response, only of the probe throttle below.
+	versionAt int64
+}
+
+const (
+	// zhdataVersionProbeInterval bounds how often the health path asks a core
+	// for its version. The stats cron refreshes reachability every 15s, so the
+	// version only has to be right, not fresh every poll.
+	zhdataVersionProbeInterval = 5 * time.Minute
+)
+
+var (
+	zhdataHealthMu sync.Mutex
+	zhdataHealth   = map[string]*ZhdataHealth{}
+
+	// zhdataPushedUsers remembers the uuid set last pushed per inbound tag, so
+	// a client that left the set (deleted, disabled, uuid replaced) has its
+	// live sessions cut instead of running on until it happens to reconnect.
+	zhdataPushedMu    sync.Mutex
+	zhdataPushedUsers = map[string]map[string]bool{}
+)
+
+// zhdataHealthOf returns the record for one tag, creating it on first sight.
+// zhdataHealthMu must be held.
+func zhdataHealthOf(tag, addr string) *ZhdataHealth {
+	h, ok := zhdataHealth[tag]
+	if !ok {
+		h = &ZhdataHealth{Tag: tag}
+		zhdataHealth[tag] = h
+	}
+	if addr != "" {
+		h.AdminAddr = addr
+	}
+	return h
+}
+
+// noteZhdataSample records the outcome of one admin API call. op names the call
+// so the UI can say which one failed.
+func noteZhdataSample(tag, addr, op string, err error) {
+	zhdataHealthMu.Lock()
+	defer zhdataHealthMu.Unlock()
+	h := zhdataHealthOf(tag, addr)
+	if err != nil {
+		h.Reachable = false
+		h.LastErrAt = time.Now().Unix()
+		h.LastError = op + ": " + err.Error()
+		return
+	}
+	h.Reachable = true
+	h.LastOkAt = time.Now().Unix()
+}
+
+// noteZhdataPush stores what a PUT /v1/users came back with. The response
+// carries the core's effective key count, which is the number to compare
+// against what the panel thinks it serves.
+func noteZhdataPush(tag, addr string, pushed int, response []byte, err error) {
+	noteZhdataSample(tag, addr, "users", err)
+	if err != nil {
+		return
+	}
+	var report struct {
+		Keys int `json:"keys"`
+	}
+	zhdataHealthMu.Lock()
+	h := zhdataHealthOf(tag, addr)
+	h.PushedUsers = pushed
+	if json.Unmarshal(response, &report) == nil {
+		h.CoreKeys = report.Keys
+	}
+	zhdataHealthMu.Unlock()
+}
+
+// noteZhdataStats folds a GET /v1/stats sample into the health view: the key
+// sources the core reports (zhdata >= 0.15.4) and its key total. A core without
+// those fields simply keeps the sources empty, which is not a warning.
+func noteZhdataStats(tag, addr string, stats *zhdataStats) {
+	zhdataHealthMu.Lock()
+	defer zhdataHealthMu.Unlock()
+	h := zhdataHealthOf(tag, addr)
+	h.Reachable = true
+	h.LastOkAt = time.Now().Unix()
+	if stats.KeysTotal > 0 {
+		h.CoreKeys = stats.KeysTotal
+	}
+	if len(stats.UserSources) > 0 {
+		sources := make([]ZhdataUserSource, 0, len(stats.UserSources))
+		for _, s := range stats.UserSources {
+			sources = append(sources, ZhdataUserSource{
+				Path:      s.Path,
+				Keys:      s.Keys,
+				LastError: s.LastError,
+				At:        s.At,
+			})
+		}
+		h.Sources = sources
+	}
+}
+
+// GetZhdataHealth returns one entry per zhdata inbound, probing the core for
+// its version when that is stale, so the UI can show what is wrong without a
+// request per core on every poll.
+func GetZhdataHealth() []*ZhdataHealth {
+	db := database.GetDB()
+	if db == nil {
+		return nil
+	}
+	inbounds, err := zhdataInbounds(db)
+	if err != nil {
+		logger.Warning("zhdata health: could not list zhdata inbounds: ", err)
+		return nil
+	}
+	users, err := zhdataEnabledUsers(db)
+	if err != nil {
+		logger.Warning("zhdata health: could not read enabled clients: ", err)
+	}
+	out := make([]*ZhdataHealth, 0, len(inbounds))
+	for _, inbound := range inbounds {
+		opts, err := parseZhdataOptions(inbound.Options)
+		if err != nil || opts.AdminAddr == "" {
+			// Nothing to poll: the row is unusable as it stands, and that is
+			// itself something to show rather than a silently missing card.
+			zhdataHealthMu.Lock()
+			h := zhdataHealthOf(inbound.Tag, opts.AdminAddr)
+			h.Reachable = false
+			h.LastError = "options"
+			if err != nil {
+				h.Warnings = []ZhdataWarning{{Code: "bad_options", Detail: "入站 options 无法解析: " + err.Error()}}
+			} else {
+				h.Warnings = []ZhdataWarning{{Code: "no_admin_addr", Detail: "未配置 admin_addr，面板无法获知核心状态"}}
+			}
+			// Hand the API a copy: the 15s stats cron writes these records, and
+			// gin marshals the response after this function has returned.
+			broken := *h
+			zhdataHealthMu.Unlock()
+			out = append(out, &broken)
+			continue
+		}
+		zhdataHealthMu.Lock()
+		h := zhdataHealthOf(inbound.Tag, opts.AdminAddr)
+		h.PanelUsers = len(users)
+		// Probe the version only when it is unknown or due for a refresh, and
+		// never at a process that just failed: the stats cron (15s) keeps
+		// reachability fresh, and the health endpoint rides the panel's 10s
+		// poll -- a 5s timeout per poll on a dead core would stall the UI.
+		probeDue := h.Version == "" ||
+			time.Now().Unix()-h.versionAt > int64(zhdataVersionProbeInterval/time.Second)
+		recentFailure := h.LastErrAt != 0 &&
+			time.Now().Unix()-h.LastErrAt < int64(zhdataVersionProbeInterval/time.Second)
+		zhdataHealthMu.Unlock()
+		if probeDue && !recentFailure {
+			// The version answers even on a core too old for the plan query,
+			// which is exactly the case worth naming in the UI.
+			response, err := zhdataAdminRequest(opts, http.MethodGet, "/v1/version", nil)
+			noteZhdataSample(inbound.Tag, opts.AdminAddr, "version", err)
+			if err == nil {
+				var report struct {
+					Version string `json:"version"`
+				}
+				if json.Unmarshal(response, &report) == nil && report.Version != "" {
+					zhdataHealthMu.Lock()
+					h.Version = report.Version
+					h.versionAt = time.Now().Unix()
+					zhdataHealthMu.Unlock()
+				}
+			}
+		}
+		zhdataHealthMu.Lock()
+		h = zhdataHealthOf(inbound.Tag, opts.AdminAddr)
+		h.Warnings = zhdataWarnings(h)
+		snapshot := *h
+		zhdataHealthMu.Unlock()
+		out = append(out, &snapshot)
+	}
+	return out
+}
+
+// zhdataWarnings turns the recorded state into the reasons an operator should
+// look, in the order they matter: the process is unreachable, its key sources
+// are broken, or the core serves fewer keys than the panel pushed.
+func zhdataWarnings(h *ZhdataHealth) []ZhdataWarning {
+	w := []ZhdataWarning{}
+	if !h.Reachable {
+		w = append(w, ZhdataWarning{Code: "down", Detail: "核心不可达 " + h.AdminAddr + "（未启动、admin_addr 被占用或版本过旧）: " + h.LastError})
+	}
+	for _, s := range h.Sources {
+		if s.LastError != "" {
+			w = append(w, ZhdataWarning{Code: "user_source", Detail: "用户库 " + s.Path + " 读取失败: " + s.LastError})
+		}
+	}
+	if h.Reachable && h.PanelUsers > 0 && h.CoreKeys > 0 && h.CoreKeys < h.PanelUsers {
+		w = append(w, ZhdataWarning{Code: "key_mismatch", Detail: "核心 key 数 " + strconv.Itoa(h.CoreKeys) + " 少于面板 " + strconv.Itoa(h.PanelUsers) + "（推送失败或用户库缺少该用户）"})
+	}
+	if len(w) == 0 {
+		return nil
+	}
+	return w
+}
+
+// zhdataMissingUsers returns the uuids this tag served in the previous push but
+// not in this one: the clients that were deleted, disabled or given new
+// credentials. The first push after a panel start has no previous set, so it
+// never kicks anybody.
+func zhdataMissingUsers(tag string, users []zhdataAdminUsers) []string {
+	current := make(map[string]bool, len(users))
+	for _, u := range users {
+		current[u.UUID] = true
+	}
+	zhdataPushedMu.Lock()
+	defer zhdataPushedMu.Unlock()
+	previous, seen := zhdataPushedUsers[tag]
+	zhdataPushedUsers[tag] = current
+	if !seen {
+		return nil
+	}
+	var gone []string
+	for uuid := range previous {
+		if !current[uuid] {
+			gone = append(gone, uuid)
+		}
+	}
+	sort.Strings(gone)
+	return gone
+}
+
+// statsUserSource is the wire shape of one -users source inside
+// GET /v1/stats (zhdata names it snake_case, the panel API speaks camelCase —
+// ZhdataUserSource is what the frontend sees).
+type statsUserSource struct {
+	Path      string `json:"path"`
+	Keys      int    `json:"keys"`
+	LastError string `json:"last_error"`
+	At        int64  `json:"at"`
+}
+
 // zhdataStats is one GET /v1/stats response (contract §1.3). Counters are
 // cumulative since the zhdata process started, so the panel keeps a per
 // inbound snapshot and credits the deltas, the same way the session tracker
@@ -305,7 +618,12 @@ func KickZhdataUser(user string) {
 type zhdataStats struct {
 	Ts             int64 `json:"ts"`
 	SessionsActive int   `json:"sessions_active"`
-	Users          []struct {
+	// KeysTotal and UserSources are additive in zhdata >= 0.15.4: what the
+	// core's effective key set holds, and per -users source how many keys it
+	// gave and why it failed. An older core reports neither.
+	KeysTotal   int               `json:"keys_total"`
+	UserSources []statsUserSource `json:"user_sources"`
+	Users       []struct {
 		UUID    string `json:"uuid"`
 		Devices int    `json:"devices"`
 		Up      int64  `json:"up"`
@@ -436,6 +754,7 @@ func CollectZhdataStats() {
 			continue
 		}
 		response, err := zhdataAdminRequest(opts, http.MethodGet, "/v1/stats", nil)
+		noteZhdataSample(inbound.Tag, opts.AdminAddr, "stats", err)
 		if err != nil {
 			logger.Warning("zhdata stats: ", inbound.Tag, " (", opts.AdminAddr, "): ", err)
 			continue
@@ -445,6 +764,7 @@ func CollectZhdataStats() {
 			logger.Warning("zhdata stats: ", inbound.Tag, ": unreadable response: ", err)
 			continue
 		}
+		noteZhdataStats(inbound.Tag, opts.AdminAddr, &stats)
 		sampledAny = true
 
 		// Dedup within one tag: one uuid can only be reported once per
@@ -597,12 +917,20 @@ func CollectZhdataStats() {
 	zhdataOnlineMu.Unlock()
 }
 
-// ForgetZhdataSnapshot drops the traffic snapshot of an inbound that is being
-// deleted, so a recreated tag does not inherit (and suppress) the old counts.
+// ForgetZhdataSnapshot drops everything the panel remembers about an inbound
+// that is being deleted: the traffic snapshot (so a recreated tag does not
+// inherit and suppress the old counts), the health record, and the pushed uuid
+// set (so a recreated tag does not kick the clients it just inherited).
 func ForgetZhdataSnapshot(tag string) {
 	zhdataStatsMu.Lock()
 	delete(zhdataSnapshots, tag)
 	zhdataStatsMu.Unlock()
+	zhdataHealthMu.Lock()
+	delete(zhdataHealth, tag)
+	zhdataHealthMu.Unlock()
+	zhdataPushedMu.Lock()
+	delete(zhdataPushedUsers, tag)
+	zhdataPushedMu.Unlock()
 }
 
 // ---------------- live sessions (contract: GET /v1/sessions) ----------------

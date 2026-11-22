@@ -121,6 +121,11 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 	} else {
 		data["onlines"] = onlines
 	}
+	// zhdata runs outside the embedded core, so the panel is the only thing
+	// that can say whether it is up and whether its user sources read cleanly.
+	// It rides this poll instead of a request of its own (service.GetZhdataHealth
+	// is a cache; the live probe behind it is throttled).
+	data["zhdataHealth"] = service.GetZhdataHealth()
 
 	return data, nil
 }
@@ -245,6 +250,14 @@ func (a *ApiService) GetRejections(c *gin.Context) {
 	user := c.Query("user")
 	rejections := devlimit.GetRejections(user)
 	jsonObj(c, rejections, nil)
+}
+
+// GetZhdataHealth is the read-only view of every zhdata external process:
+// reachable or not, its version, what was pushed against what the panel has,
+// and each -users source's key count and last error. The msg stays empty --
+// the frontend polls this, and a non-empty msg fires a toast (httputil).
+func (a *ApiService) GetZhdataHealth(c *gin.Context) {
+	jsonObj(c, service.GetZhdataHealth(), nil)
 }
 
 func (a *ApiService) GetSessions(c *gin.Context) {
@@ -394,6 +407,11 @@ func (a *ApiService) ResetTraffic(c *gin.Context) {
 		jsonMsg(c, "resetTraffic", err)
 		return
 	}
+	// The reset zeroes used and re-enables clients. zhdata answers the plan
+	// query from the set it was pushed, and it is not part of the embedded
+	// core this restarts, so the fresh quota/used has to be pushed too
+	// (otherwise a reset client still shows its old usage for a minute).
+	service.PushZhdataUsersLatest()
 	err := a.ConfigService.RestartCore()
 	jsonMsg(c, "resetTraffic", err)
 }
