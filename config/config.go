@@ -45,7 +45,10 @@ const (
 //	ZY8  migration 1.6.5：把 clients.links 里 ZY5 时代生成的 zhdata 链接刷成当前形态
 //	     （只写端口池第一个端口，remark 走 JoinRemark）——该列只在保存客户/入站时重写，
 //	     所以升级后「用户编辑」弹窗里的链接与二维码仍显示旧的整端口池 URI
-const VersionSuffix = "ZY8"
+//	ZY9  PUT /v1/users 附带 up_kbps/down_kbps（zhdata >= 0.15.6）：client.group 的
+//	     带宽限速不再只作用于 sing-box 入站，zhdata 隧道进程与 relay 也按同一组
+//	     2M/500K 限速（此前核心没有按用户限速，面板填的组对 zhdata 完全无效）
+const VersionSuffix = "ZY9"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

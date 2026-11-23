@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/alireza0/s-ui/core"
+	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
@@ -128,9 +129,20 @@ func zhdataAdminRequest(opts *zhdataOptions, method string, path string, body an
 // answers when a client asks its tunnel for its plan (到期日 / 流量限额).
 // Zero means "the panel carries no such limit", and zhdata then leaves any
 // record from its own file/sqlite sources intact rather than erasing it.
+//
+// UpKbps/DownKbps (zhdata >= 0.15.6) are the bandwidth caps in kbit/s read from
+// the client's group through the same helper the sing-box inbounds use
+// (core/bwlimit). They are what makes a group of "2M" mean anything on the
+// zhdata path: a zhdata tunnel terminates in its own process, never in a
+// sing-box inbound, so bwlimit.Wrap never sees those bytes. An empty group
+// means unlimited; a group that does not read as a bandwidth is capped at
+// bwlimit.DefaultKbit, exactly how a hysteria2 or vless client of the same user
+// is metered.
 type zhdataAdminUsers struct {
 	UUID       string `json:"uuid"`
 	MaxDevices int    `json:"max_devices"`
+	UpKbps     int    `json:"up_kbps"`
+	DownKbps   int    `json:"down_kbps"`
 	Expiry     int64  `json:"expiry"`
 	Quota      int64  `json:"quota"`
 	Used       int64  `json:"used"`
@@ -138,25 +150,30 @@ type zhdataAdminUsers struct {
 
 // zhdataEnabledUsers reads the clients every zhdata process should serve:
 // every enabled client with a config.zhdata.uuid, carrying the same device
-// limit the panel feeds to devlimit (`devs`, 0 = no limit) and the account
-// fields the plan query answers with (expiry / volume / up+down).
+// limit the panel feeds to devlimit (`devs`, 0 = no limit), the bandwidth caps
+// its group stands for, and the account fields the plan query answers with
+// (expiry / volume / up+down).
 func zhdataEnabledUsers(db *gorm.DB) ([]zhdataAdminUsers, error) {
 	type row struct {
-		UUID       string
-		MaxDevices int
-		Expiry     int64
-		Volume     int64
-		Up         int64
-		Down       int64
+		UUID        string
+		MaxDevices  int
+		ClientGroup string
+		Expiry      int64
+		Volume      int64
+		Up          int64
+		Down        int64
 	}
 	var rows []row
 	const base = "FROM clients WHERE clients.enable = true AND json_extract(clients.config, '$.zhdata.uuid') IS NOT NULL"
 	const account = "COALESCE(clients.expiry, 0) AS expiry, COALESCE(clients.volume, 0) AS volume, COALESCE(clients.up, 0) AS up, COALESCE(clients.down, 0) AS down"
-	err := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, COALESCE(clients.devs, 0) AS max_devices, "+account+" "+base).Scan(&rows).Error
+	// "group" is a keyword, hence the quoting; the alias keeps the scan name
+	// unambiguous.
+	const groupCol = `COALESCE(clients."group", '') AS client_group`
+	err := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, COALESCE(clients.devs, 0) AS max_devices, "+groupCol+", "+account+" "+base).Scan(&rows).Error
 	if err != nil {
 		// A database that predates the devs column still has usable users.
 		rows = nil
-		if err2 := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, 0 AS max_devices "+base).Scan(&rows).Error; err2 != nil {
+		if err2 := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, 0 AS max_devices, "+groupCol+" "+base).Scan(&rows).Error; err2 != nil {
 			return nil, err
 		}
 	}
@@ -165,13 +182,17 @@ func zhdataEnabledUsers(db *gorm.DB) ([]zhdataAdminUsers, error) {
 		if r.UUID == "" {
 			continue
 		}
-		users = append(users, zhdataAdminUsers{
+		user := zhdataAdminUsers{
 			UUID:       r.UUID,
 			MaxDevices: r.MaxDevices,
 			Expiry:     r.Expiry,
 			Quota:      r.Volume,
 			Used:       r.Up + r.Down,
-		})
+		}
+		if limit, ok := bwlimit.Group(r.ClientGroup); ok {
+			user.UpKbps, user.DownKbps = limit.Up, limit.Down
+		}
+		users = append(users, user)
 	}
 	return users, nil
 }

@@ -28,11 +28,12 @@ JSON 端点（全部 `Content-Type: application/json`）：
 ### 1.2 `PUT /v1/users` — 全量替换 API 用户集
 请求：
 ```json
-{"users":[{"uuid":"abc...","max_devices":2}, {"uuid":"def...","max_devices":0}]}
+{"users":[{"uuid":"abc...","max_devices":2,"up_kbps":2000,"down_kbps":2000}, {"uuid":"def...","max_devices":0}]}
 ```
 语义：
 - 替换的是 **"API 用户集"**；与文件/sqlite 来源 **取并集**（保持 c498 现有 users.txt 用法不破坏）。
 - `max_devices`：0=不限；策略合并规则：**API 优先于文件**（覆盖同名 uuid）。
+- `up_kbps`/`down_kbps`（**zhdata ≥0.15.6 增量字段**）：该用户上下行带宽上限，单位 kbit/s（1000 进制）。面板取值 = `bwlimit.Group(clients."group")`，也就是 hy2/vless/trojan 入站已经在用的那套「组即带宽」语义（空组=不限；读不出带宽的组=DefaultKbit=1000，不给白名单）。单值写法 `speed_limit_kbps` 等价于两向同值（核心也支持）。0=不限，且**与 `max_devices` 同样的整体覆盖语义**：条目不带 ⇒ 抹掉文件/sqlite 源里的限速（所以面板每次都全量带值）。限速在核心按 **uuid 聚合**（跨该用户所有隧道会话与流），zhdata 客户端 `-conns 32` 不会变成 32 倍额度；改值当场生效，不用重连或重启进程。详见核心接口文档 §3.4.1。
 - `expiry/quota/used`（**zhdata ≥0.15.4 增量字段**，面板取自 clients.expiry / volume / up+down）：核心把它作为该 uuid 的套餐记录，用于隧道内套餐查询（客户端在隧道里请求 `query.zhdata`）。三个字段**全 0 = 面板没有该信息**，此时核心**保留**文件/sqlite 源里的同名记录，不抹掉。
 - 空数组 `{"users":[]}` = 清空 API 用户集（不影响文件源）。
 - 返回 `{"ok":true,"keys":N}`；zhdata 在内存原子上换表，正在会话按现有 reject/kick 语义处理（被移除的 uuid 新连接拒绝；已有会话不强制断，除非另行 kick）。
@@ -48,12 +49,13 @@ JSON 端点（全部 `Content-Type: application/json`）：
     {"path":"/etc/s-ui/private/s-ui.db","keys":0,"last_error":"no such file or directory","at":1795350000}
   ],
   "users": [
-    {"uuid":"abc...","devices":2,"up":102400,"down":988172}
+    {"uuid":"abc...","devices":2,"up":102400,"down":988172,"up_kbps":2000,"down_kbps":2000}
   ]
 }
 ```
 - `devices` = 当前活跃 device_id 数（与 max_devices 同一计数）。
 - `up/down` = 该 uuid 隧道字节累计（pumpUp/pumpDown 计数器）。s-ui 侧按周期采样求增量，语义与面板 SessionTracker flush 一致。
+- `up_kbps`/`down_kbps`（**zhdata ≥0.15.6 增量字段**）= 核心当前对该用户生效的带宽上限（kbit/s；0 或字段缺失=不限）。这是面板核对「我填的 2M 到底传没传到核心」的只读回显，不必再靠测速反推；限速的计费点与这里的 `up/down` 是同一处。
 - `keys_total` / `user_sources`（**zhdata ≥0.15.4 增量字段**，老核心不返回）：有效 key 集大小；以及 `-users` 每个源「最后一次成功加载贡献几个 key」「最后一次尝试的时间与错误」。这是把「用户库路径写错」这类只进 journald 的告警变成面板可见的唯一途径（面板 §2.5）。
 
 ### 1.4 `POST /v1/users/kick` — 切断指定用户全部会话
@@ -90,6 +92,7 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - Kick：面板 Kick 用户时并列调 `POST /v1/users/kick`。
 - 套餐字段：users 推送除 uuid+max_devices 外带上 `expiry=clients.expiry`、`quota=clients.volume`、`used=clients.up+down`（zhdata ≥0.15.4 用它们在隧道内回答套餐查询，见核心接口文档 §3.8）。因此 `resetTraffic`（清零 up/down、重新启用客户）也要补一次推送，否则核心最多滞后 1 分钟。
 - 离开集合自动 kick：面板对比前后两次推送的 uuid 集，对被删除/禁用/换凭据的客户自动 `POST /v1/users/kick`（核心只对**新**连接做 key miss，不断已有隧道）。首次推送（面板刚启动）不踢任何人；入站删除时清掉该 tag 的前后快照。
+- **组即限速也要推到 zhdata**（**s-ui v1.6.3-ZY9+ / zhdata ≥0.15.6**）：`clients."group"` 读出的带宽（`bwlimit.Group`，与 hy2/vless/trojan 入站同一个函数）作为 `up_kbps`/`down_kbps` 随同推送。此前 ZY2 的限速只挂在 sing-box 入站的 `bwlimit.Wrap` 上，zhdata 隧道由独立进程（`zhdata.service`/`zhdata-relay.service`）终结，面板填的组对 zhdata 用户完全无效（客户测速不降）。推送点与触发时机不变（保存客户/入站、enable/disable、resetTraffic 都推），所以改组名/改限速当场生效，无需重启核心。relay 与终点进程都会收到同一份表：串联的令牌桶**不叠加**，稳态速率仍是那个值。旧核心忽略这两个字段（不影响其它字段），旧面板不带 ⇒ 该用户不限速。
 
 ### 2.5 健康可见性（面板 UI 能看到核心异常）
 所有 admin 调用同时是健康采样（`service/zhdata.go` 的按 tag 记录：可达性、核心版本、推送数 vs 面板客户数、核心 key 数、每个 `-users` 源的 key 数与最后一次错误）：
@@ -138,6 +141,7 @@ JSON 端点（全部 `Content-Type: application/json`）：
 6. 面板改客户到期日/流量包 → 客户端在隧道里查套餐立即（保存后推送）反映，无需等 1 分钟。
 7. 把 zhdata 的 `-users` 指到一个不存在的 sqlite 路径 → 面板顶栏出现 zhdata 异常 chip，入站卡片 tooltip 里能看到「该用户源读取失败」而不必 ssh 看 journald。
 8. 面板禁用/删除客户 → 该客户的 zhdata 隧道被切（自动 kick），新连接被拒。
+9. 客户组填 `2M` → `curl -H "Authorization: Bearer <token>" http://127.0.0.1:6070/v1/stats | jq '.users[]|{uuid,up_kbps,down_kbps}'` 显示 `2000/2000`；该客户 zhenhanvn 测速上/下行都被压到 ~2Mbps（含 `-conns 32` 的多隧道），改组名为 `10M` 保存后**不重连**再测即变 ~10Mbps；组清空则不限速。同一客户走 hysteria2 入站时行为一致（同一个限速函数）。
 
 ## 6. zhdata 入站 transparent relay（zhdata→zhdata 透明转发，s-ui v1.6.3-ZY6+ / zhdata core ≥0.15.2）
 
