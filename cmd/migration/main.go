@@ -115,6 +115,18 @@ func MigrateDb() error {
 		}
 	}
 
+	// 1.6.5 (ZY8): the zhdata share URIs already stored in clients.links. That
+	// column is only rewritten when a client or one of its inbounds is saved,
+	// so the port-pool-wide URI a ZY5 panel generated is still what the client
+	// modal, its copy button and the QR code show after an upgrade. Gated like
+	// 1.6.4 -- this fork's version row (1.6.3-ZYn) sorts below it, so the chain
+	// replays -- and idempotent: a link in the current form is left alone.
+	if compareVersions(dbVersion, "1.6.5") < 0 {
+		if err := to1_6_5(tx); err != nil {
+			return fmt.Errorf("migration to 1.6.5 failed: %w", err)
+		}
+	}
+
 	if err := setVersion(tx, currentVersion); err != nil {
 		return fmt.Errorf("update version failed: %w", err)
 	}

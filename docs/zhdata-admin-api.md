@@ -106,7 +106,21 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - migration（对齐 1_6_3.go 写法）：存量客户复制其 vless uuid（没有则新造）填入 `config.zhdata.uuid`。
 - 前端 randomConfigs 生成同样形状；Client.vue 里 zhdata 块显示/刷新 uuid。
 - 链接：`zhdata://<uuid>@<host>:<port>[,<host2>:<port2>]#<remark>`（已在核心接口文档 §3.2 定案）。
-  面板只写端点池的**第一个端口**：客户端 `slot i → servers[i%N]`（zhdata client.go），单端口就是一条可用入站；64 端口全列会让 URI 变成几百字节、客户端导入吃力。多端口（多服务器）留给手工拼接。
+  面板只写端点池的**第一个（最小）端口**，也不写 `conns=`/`portspan=` 参数（用客户端默认值）：
+  - 端点池由**客户端**展开：zhenhanvn 的 zhdata 节点默认 `autoports=1`、`portspan=32`、`conns=32`
+    （`ServiceLib/Models/Entities/ZhDataExtraItem.cs`），单端点会展开成 `port … port+31`，
+    再按 `slot i → servers[i%N]`（zhdata `client.go`）选端点——slot0→49888、slot1→49889…
+    服务器不需要也不会自己递增端口，它只在 `-listen` 列出的每个端口上各起一个 listener。
+  - 所以**入站端口池必须从最小端口起连续**：面板写最小端口 + 客户端连续展开正好对上；
+    端口池跳号会让一部分 slot 连到服务器没有监听的端口。
+  - slot 上限是 64（握手字段 `maxSlots = 64`，zhdata `session.go`），`portspan`/`conns` 超过 64 对单个客户端无意义。
+  - 需要偏离默认值时用链接 query：`conns=` / `spread=` / `dlconns=` / `migrate=` / `slotbase=` / `autoports=0` / `portspan=`。
+    导入时若端点数正好等于 `portspan` 且连续，GUI 会折叠回单端点（`ZhDataFmt.ExpandAutoPorts`）。
+  - 64 端口全列会让 URI 变成几百字节、客户端导入吃力。多端口（多台服务器）留给手工拼接。
+- 存量链接刷新（ZY8 / migration `1_6_5.go`）：`clients.links` 只在保存客户或其入站时重写，
+  所以 ZY5 那版生成器写出的整端口池 URI 会一直留在「用户编辑」弹窗、复制按钮和二维码里。
+  migration 1.6.5 在启动时把 `zhdata://` 的 local 条目按当前生成器重算（其他协议的链接一字节都不动），
+  幂等：已是当前形态的条目不改。入站被删掉、入站有多个 addrs、客户没有 zhdata 凭据这三种情况一律跳过。
 
 ## 4. 面板内全局总设备数（与 zhdata 无关的独立改进）
 

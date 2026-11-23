@@ -42,7 +42,10 @@ const (
 //	     api/load 上），前端入站卡片 chip + 顶栏告警 chip；PUT /v1/users 附带
 //	     expiry/quota/used（隧道内套餐查询走面板值）；对离开用户集的客户自动 kick；
 //	     resetTraffic 后补推送；fetchUsers 跳过无该协议凭据的客户（NULL 不再炸掉配置）
-const VersionSuffix = "ZY7"
+//	ZY8  migration 1.6.5：把 clients.links 里 ZY5 时代生成的 zhdata 链接刷成当前形态
+//	     （只写端口池第一个端口，remark 走 JoinRemark）——该列只在保存客户/入站时重写，
+//	     所以升级后「用户编辑」弹窗里的链接与二维码仍显示旧的整端口池 URI
+const VersionSuffix = "ZY8"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。
