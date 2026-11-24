@@ -94,7 +94,19 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - 离开集合自动 kick：面板对比前后两次推送的 uuid 集，对被删除/禁用/换凭据的客户自动 `POST /v1/users/kick`（核心只对**新**连接做 key miss，不断已有隧道）。首次推送（面板刚启动）不踢任何人；入站删除时清掉该 tag 的前后快照。
 - **组即限速也要推到 zhdata**（**s-ui v1.6.3-ZY9+ / zhdata ≥0.15.6**）：`clients."group"` 读出的带宽（`bwlimit.Group`，与 hy2/vless/trojan 入站同一个函数）作为 `up_kbps`/`down_kbps` 随同推送。此前 ZY2 的限速只挂在 sing-box 入站的 `bwlimit.Wrap` 上，zhdata 隧道由独立进程（`zhdata.service`/`zhdata-relay.service`）终结，面板填的组对 zhdata 用户完全无效（客户测速不降）。推送点与触发时机不变（保存客户/入站、enable/disable、resetTraffic 都推），所以改组名/改限速当场生效，无需重启核心。relay 与终点进程都会收到同一份表：串联的令牌桶**不叠加**，稳态速率仍是那个值。旧核心忽略这两个字段（不影响其它字段），旧面板不带 ⇒ 该用户不限速。
 
+### 2.4 新节点部署（面板不拉起核心进程）
+
+`service/` 里没有任何 `exec.Command`：面板对 zhdata 只做**记账（入站行）+ admin 推送 + 健康探测**，zhdata 进程本身由运维安装（systemd）。所以每个节点的顺序是：
+
+1. 面板升到 ZY9 → 备份 `db/s-ui.db*` → 换 `sui` → **`./sui migrate`**（ZY5 的 1.6.4 给存量客户补 `config.zhdata.uuid`，没这一步视图里是 0 行）→ 起服务。
+2. 装核心：`install -m 755 zhdata-linux-amd64 /opt/zhdata/zhdata-tunnel-linux-amd64`，然后 **`zhdata -init-view /usr/local/s-ui/db/s-ui.db`**（zhdata ≥**0.15.7**）。这一步建 `zhdata_users` 视图，让 `-users <面板 db>` 能读到客户；CentOS 7 自带的 sqlite3（3.7 级）**没有 JSON1**，用它自己的 `sqlite3` 建不出这个视图，所以语句放在核心里（见核心接口文档 §3.5.1）。
+3. 写 unit（`-mode server -listen :49888.. -admin 127.0.0.1:6070 -users /usr/local/s-ui/db/s-ui.db -backend direct -max-sessions N`，小内存机器把 N 收到 1200 一档）→ `systemctl enable --now`。
+4. 面板里建 zhdata 入站，`listen_ports` 与 `-listen` 一致、`admin_addr` 对上；卡片应显示 `core <版本> · N users pushed`，`GET /v1/stats` 里 `up_kbps/down_kbps` 应回显组限速。
+
+2026-11-24 的 X22（CentOS 7，ZY4→ZY9）就是按这四步做的，实测组限速生效（1.5M 组 191 KB/s、10M 组 1.40 MB/s）。
+
 ### 2.5 健康可见性（面板 UI 能看到核心异常）
+
 所有 admin 调用同时是健康采样（`service/zhdata.go` 的按 tag 记录：可达性、核心版本、推送数 vs 面板客户数、核心 key 数、每个 `-users` 源的 key 数与最后一次错误）：
 
 - `GET api/zhdataHealth` → 每个 zhdata 入站一条；同一份数据挂在 `api/load` 的 `zhdataHealth` 字段上（搭 10s 轮询，不额外发请求）。版本探测有 5 分钟节流，且刚失败的进程不再探（避免面板轮询被 5s 超时拖住）。
