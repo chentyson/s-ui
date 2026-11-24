@@ -498,7 +498,7 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			// process still binds 49888-49919 and clients cannot connect
 			// (service/zhdata_unit.go). Runs after the push so a restarted
 			// process picks the users up from the view immediately.
-			SyncZhdataService(database.GetDB())
+			SyncZhdataServices(database.GetDB())
 		}
 		// A client's bandwidth cap lives in its group and is read per
 		// connection, so a save that touched one has to push a fresh table.

@@ -182,10 +182,11 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			return err
 		}
 		var existing struct {
-			Id   uint
-			Type string
+			Id      uint
+			Type    string
+			Options json.RawMessage
 		}
-		err = tx.Model(model.Inbound{}).Select("id, type").Where("tag = ?", tag).Scan(&existing).Error
+		err = tx.Model(model.Inbound{}).Select("id, type, options").Where("tag = ?", tag).Scan(&existing).Error
 		if err != nil {
 			return err
 		}
@@ -204,6 +205,13 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 		err = tx.Where("tag = ?", tag).Delete(model.Inbound{}).Error
 		if err != nil {
 			return err
+		}
+		// ZY11: the panel wrote a unit for this inbound, so deleting the row has
+		// to take the service with it -- otherwise a Restart=always zhdata keeps
+		// binding the port pool of an inbound that no longer exists. Failures
+		// only warn: the row is gone either way (service/zhdata_unit.go).
+		if isZhdataInbound(existing.Type) {
+			RemoveZhdataUnit(tag, existing.Options)
 		}
 		ForgetZhdataSnapshot(tag)
 	default:

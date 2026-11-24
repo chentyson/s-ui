@@ -29,6 +29,10 @@ func (a *APIHandler) initRouter(g *gin.RouterGroup) {
 	})
 	g.POST("/:postAction", a.postHandler)
 	g.GET("/:getAction", a.getHandler)
+	// POST api/zhdataCore/update is a two-segment action, which ":postAction"
+	// cannot match; registering it next to the catch-all keeps the update under
+	// the same login middleware as everything else.
+	g.POST("/zhdataCore/update", a.ApiService.UpdateZhdataCore)
 }
 
 func (a *APIHandler) postHandler(c *gin.Context) {
@@ -99,6 +103,8 @@ func (a *APIHandler) getHandler(c *gin.Context) {
 		a.ApiService.GetRejections(c)
 	case "zhdataHealth":
 		a.ApiService.GetZhdataHealth(c)
+	case "zhdataCore":
+		a.ApiService.GetZhdataCore(c)
 	case "sessions":
 		a.ApiService.GetSessions(c)
 	case "logs":

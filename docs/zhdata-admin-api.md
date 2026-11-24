@@ -94,28 +94,56 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - 离开集合自动 kick：面板对比前后两次推送的 uuid 集，对被删除/禁用/换凭据的客户自动 `POST /v1/users/kick`（核心只对**新**连接做 key miss，不断已有隧道）。首次推送（面板刚启动）不踢任何人；入站删除时清掉该 tag 的前后快照。
 - **组即限速也要推到 zhdata**（**s-ui v1.6.3-ZY9+ / zhdata ≥0.15.6**）：`clients."group"` 读出的带宽（`bwlimit.Group`，与 hy2/vless/trojan 入站同一个函数）作为 `up_kbps`/`down_kbps` 随同推送。此前 ZY2 的限速只挂在 sing-box 入站的 `bwlimit.Wrap` 上，zhdata 隧道由独立进程（`zhdata.service`/`zhdata-relay.service`）终结，面板填的组对 zhdata 用户完全无效（客户测速不降）。推送点与触发时机不变（保存客户/入站、enable/disable、resetTraffic 都推），所以改组名/改限速当场生效，无需重启核心。relay 与终点进程都会收到同一份表：串联的令牌桶**不叠加**，稳态速率仍是那个值。旧核心忽略这两个字段（不影响其它字段），旧面板不带 ⇒ 该用户不限速。
 
-### 2.4 新节点部署（**v1.6.3-ZY10 起面板负责 unit**）
+### 2.4 新节点部署（**v1.6.3-ZY11 起面板同时负责核心本体与 unit**）
 
 ZY10 之前 `service/` 里没有任何 `exec.Command`：面板只做记账 + admin 推送 + 健康探测，进程由运维装 systemd。
 代价在 C455 现形：界面上把入站端口改成 45501-45564 之后，`zhdata.service` 的 `-listen` 还停在 49888-49919，
 455xx 上根本没有 TCP 监听 ⇒ 客户端「无法连接」而入站卡片还是绿的。
+ZY10 把 unit 交给了面板，但核心二进制仍在面板之外（运维手工 `install -m 755 … /opt/zhdata/…`），
+于是节点会悄悄跑着旧核心而界面毫无察觉，新装的面板连一个可指的二进制都没有。
+**ZY11 把这两半都收进面板**：核心从 GitHub release 下载到自己的部署目录，**每个 zhdata 入站一个 unit**。
 
-**ZY10（`service/zhdata_unit.go`）**：面板按入站参数生成 `/etc/systemd/system/zhdata.service`：
+**核心（`service/zhdata_core.go`）**
 
-- 只托管**一个** unit：`admin_addr` 等于 `127.0.0.1:6070` 的那个 zhdata 入站（其余 admin 端口的进程仍归运维，例如 C498 的 `zhdata-relay.service`/6071）。入站没有 `admin_addr` ⇒ 面板不管任何 unit。
-- `-listen` 用 `util.BuildZhdataListen`（与生成客户链接同一个函数）⇒ 端口池与进程监听不可能再漂移；`listen_ports` 为空 ⇒ 不带 `-listen`（核心按默认端口起）。
-- 文本一致 ⇒ 不动（不 `daemon-reload`、不 `restart`）；`ExecStart` 变了 ⇒ 写文件（0644）+ `daemon-reload` + `zhdata -init-view` + `restart`（新建时还 `enable`）。
-- 二进制缺失 / 非 linux / 没有 systemctl / unit 上有 drop-in 覆盖 `ExecStart` / admin 端口已被别的进程占住 ⇒ 全部变成入站卡片上的 warning（`zhdataWarnings` 里 code=`unit`），不静默改写。
-- 触发点 = `ConfigService.Save` 的收尾（保存入站/客户之后），与 60s 用户推送同一路径；面板启动时不主动 restart（渲染结果与磁盘一致就不会动）。
+- 面板托管路径 = `<s-ui 可执行文件所在目录>/zhdata/zhdata(.exe)`（与 `config.GetDBFolderPath` 同一个「部署目录」概念）。
+- 版本源：公开仓库 `chentyson/zhdata` 的 latest release（`GET https://api.github.com/repos/chentyson/zhdata/releases/latest`），
+  资产名 `zhdata-<os>-<arch>.zip`（`linux`/`windows`/`macos` × `64`/`arm64`；映射由 `zhdataAssetNameFor` 做）。
+  资产 JSON 里的 `digest: "sha256:…"` 存在就校验，不存在就跳过（不假装校验过）。
+- 当前版本 = 执行 `<binary> -version`（zhdata 打印 `zhdata 0.15.8`，解析不出 ⇒ `unknown`）；结果按「文件 size+mtime」缓存，
+  安装后立刻清缓存 ⇒ 界面刷新就看见新版本，面板 10s 轮询也不会反复 fork 进程。
+- `GET api/zhdataCore` → `{installed, path, external, current_version, latest_version, need_update, download_asset, units, error}`：
+  `latest_version` 在查询失败时为 `null`（原因在 `error`）；`need_update` = 未装 / 版本解析不出 / 比最新旧；
+  `external=true` 表示面板找到但不拥有这个二进制（旧 `/opt/zhdata` 安装或 `SUI_ZHDATA_PATH`），界面据此提示迁移。
+- `POST api/zhdataCore/update`（两段路径，body `{}`，下载超时 120s）→ 下载 → 校验 sha256 → 解压 `zhdata/zhdata(.exe)` →
+  临时文件 + `chmod 0755` → 旧文件改名成 `zhdata(.exe).bak` 后原子替换 → 清版本缓存 →
+  对每个受托管 unit 先 `<binary> -init-view <面板 db>` 再 `systemctl restart`（**即使 ExecStart 没变也 restart**：跑着的还是旧进程）。
+  成功返回 `{from, to, path, external, restarted:[unit…]}`，失败只返回错误且**不动**现有核心（不重启、不换文件）。
+- 解析顺序：`SUI_ZHDATA_PATH`（最高，面板不更新它，更新请求直接报错让运维取消）→ 面板托管路径 → 旧 `/opt/zhdata/zhdata-tunnel-linux-amd64`。
+  三处都没有 ⇒ `installed=false`，保存 zhdata 入站时卡片告警直接指向面板内的下载入口。
 
-四步部署（ZY10 版）：
+**每入站一个 unit（`service/zhdata_unit.go`）**
 
-1. 面板升到 ZY10 → 备份 `db/s-ui.db*` → 换 `sui` → **`./sui migrate`**（ZY5 的 1.6.4 给存量客户补 `config.zhdata.uuid`，没这一步视图里是 0 行）→ 起服务。
-2. 装核心：`install -m 755 zhdata-linux-amd64 /opt/zhdata/zhdata-tunnel-linux-amd64`（面板就找这个路径）。核心 ≥**0.15.7** 自带 `-init-view`（建 `zhdata_users` 视图；CentOS 7 的 sqlite3 没有 JSON1，语句放进核心，见核心接口文档 §3.5.1）；ZY10 在每次要 restart 前会自己跑一次 `-init-view`。
-3. 面板里建 zhdata 入站：`listen_ports` 写端口池、`admin_addr` 填 `127.0.0.1:6070`、`backend`/`max_sessions`/`decoy` 按需 ⇒ 保存后面板生成 unit 并 `enable --now`，日志出现 `zhdata unit: 已创建并启动 zhdata.service（入站 <tag>）`。
-4. 核验：卡片 chip 显示 `core <版本> · N users pushed`；`systemctl cat zhdata.service` 的 `-listen` 与入站端口池一致；`GET /v1/stats` 回显 `up_kbps/down_kbps`。
+- 托管**所有** options 可解析的 zhdata 入站（不再要求 `admin_addr` 等于默认值）。命名：`admin_addr` 为默认 `127.0.0.1:6070` 的入站
+  沿用 **`zhdata.service`**（ZY10 现场不动，含 `ExecStart` 逐字不变就不重启的兼容），其余按 tag 生成
+  **`zhdata-<tag>.service`**（小写、`[^a-z0-9._-]`→`-`、超长截断、撞名加 `-2`/`-3`；按 tag 排序分配，结果确定）。
+- ZY10 的谨慎逐条保留：unit 文本与渲染结果一致 ⇒ 什么都不做；`ExecStart` 变了 ⇒ 写文件（0644）+ `daemon-reload` + `-init-view` + `restart`（新建时还 `enable`）；
+  unit 不存在但 `admin_addr` 上已有进程应答 ⇒ 只告警不写（不抢端口）；drop-in 里有 `ExecStart` 覆盖 ⇒ 告警；没有 systemctl / 容器 ⇒ 告警；非 linux ⇒ 不碰 systemd。
+- **孤儿清理**：每次保存 zhdata 入站/客户时，删除「面板写过」（`Description` 以 `Description=zhdata-tunnel server` 开头）但当前没有入站对应的 unit
+  （`stop` + `disable` + 删文件 + `daemon-reload`）。运维自己写的 `zhdata-*.service`（描述不是这个前缀）不会被碰，例如 C498 的 `zhdata-relay.service`/6071。
+- **删 zhdata 入站** = `systemctl stop` + `disable` + 删 unit 文件 + `daemon-reload`（按 unit 文件里的 `Description=(<tag>)` 认单元，tag 改过名也找得回）；失败只告警不阻塞删除。
 
-改端口池/改 `max_sessions`/改 `backend` ⇒ 在界面上保存一次入站即可，面板会重写并重启核心进程（隧道断几秒）；**重启后有个 ≤60s 的「不限速窗口」**（视图不带速率，速率靠下一次 `PUT /v1/users`），测限速前先等核心日志出现 `admin API users replaced: … bandwidth-limited`。
+四步部署（ZY11 版）：
+
+1. 面板升到 ZY11 → 备份 `db/s-ui.db*` → 换 `sui` → **`./sui migrate`**（ZY5 的 1.6.4 给存量客户补 `config.zhdata.uuid`，没这一步视图里是 0 行）→ 起服务。
+2. 装核心：面板「入站」页的 **zhdata 核心** 处点更新即可（装到 `<部署目录>/zhdata/zhdata`），不需要再手工 scp。
+   核心 ≥**0.15.7** 自带 `-init-view`（建 `zhdata_users` 视图；CentOS 7 的 sqlite3 没有 JSON1，语句放进核心，见核心接口文档 §3.5.1），面板在每次 restart 前自己跑一次。
+   旧现场照旧可用：`/opt/zhdata/zhdata-tunnel-linux-amd64` 还在就继续用它（`external=true`），点一次更新就迁到面板托管路径并把 unit 的 `ExecStart` 换过去。
+3. 面板里建 zhdata 入站：`listen_ports` 写端口池、`admin_addr` 填 `127.0.0.1:6070`（第二个入站填别的端口）、`backend`/`max_sessions`/`decoy` 按需
+   ⇒ 保存后面板生成对应 unit 并 `enable --now`，日志出现 `zhdata unit: 已生成并启用 /etc/systemd/system/zhdata-xxx.service（入站 <tag>）`。
+4. 核验：卡片 chip 显示 `core <版本> · N users pushed`；`systemctl list-units 'zhdata*'` 与入站一一对应；`systemctl cat` 的 `-listen` 与入站端口池一致；`GET /v1/stats` 回显 `up_kbps/down_kbps`。
+
+改端口池/改 `max_sessions`/改 `backend` ⇒ 在界面上保存一次入站即可，面板只重写并重启**那个**入站的进程（别的入站不受影响，隧道断几秒）；
+**重启后有个 ≤60s 的「不限速窗口」**（视图不带速率，速率靠下一次 `PUT /v1/users`），测限速前先等核心日志出现 `admin API users replaced: … bandwidth-limited`。
 
 两个直接写 DB 的坑（都踩过）：
 

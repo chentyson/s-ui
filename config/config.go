@@ -54,7 +54,20 @@ const (
 //	     并在启动前跑核心 `-init-view` 建用户视图；发现 drop-in 里有 ExecStart 覆盖、
 //	     二进制缺失、admin_addr 上已有别人的进程等情况只在入站卡片上告警，不再静默
 //	     （C455 现场：界面把端口改成 45501-45564，进程还听 49888-49919，客户端连不上）
-const VersionSuffix = "ZY10"
+//	ZY11 面板托管 zhdata 核心本体（service/zhdata_core.go）：GET api/zhdataCore 给出当前版本/最新
+//	     版本/是否需要更新与资产名，POST api/zhdataCore/update 从 GitHub chentyson/zhdata 的 latest
+//	     release 下载 zhdata-<os>-<arch>.zip（资产带 digest 就校验 sha256）→ 解压 zhdata/zhdata(.exe)
+//	     → 临时文件 + chmod 0755 + 备份旧文件后原子替换到「面板目录/zhdata/」→ 对每个受托管 unit
+//	     跑 -init-view 再 systemctl restart。SUI_ZHDATA_PATH 指向面板外的核心时优先级最高且不更新它；
+//	     ZY10 时代的 /opt/zhdata/zhdata-tunnel-linux-amd64 仍可用，但核心状态里标 external=true，
+//	     界面提示迁移；两处都没有 ⇒ installed=false，保存入站时的告警直接指向面板内的下载入口。
+//	     service/zhdata_unit.go 同时改成**每个 zhdata 入站一个 unit**：admin_addr 为默认 127.0.0.1:6070
+//	     的入站沿用 zhdata.service（ZY10 现场不动），其余按 tag 生成 zhdata-<tag>.service（小写、
+//	     [^a-z0-9._-]→-、撞名加序号）；ZY10 的谨慎全部保留（ExecStart 没变不 restart、unit 不存在但
+//	     admin_addr 上已有进程应答就只告警不写、drop-in 覆盖告警、没有 systemctl/容器告警），每次同步
+//	     顺带删掉面板写过但已无对应入站的 unit（判定：Description 以 "zhdata-tunnel server" 开头），
+//	     删 zhdata 入站时 stop + disable + 删 unit 文件 + daemon-reload（失败只告警不阻塞删除）
+const VersionSuffix = "ZY11"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

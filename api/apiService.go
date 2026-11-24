@@ -260,6 +260,27 @@ func (a *ApiService) GetZhdataHealth(c *gin.Context) {
 	jsonObj(c, service.GetZhdataHealth(), nil)
 }
 
+// GetZhdataCore is the read-only status of the zhdata core on this node: where
+// the binary is (and whether the panel owns it), the version it reports, the
+// newest public release, and whether an update is warranted. The frontend calls
+// it before offering a new zhdata inbound, so a node without a core is a check
+// rather than a surprise after the first save (service/zhdata_core.go).
+func (a *ApiService) GetZhdataCore(c *gin.Context) {
+	jsonObj(c, service.GetZhdataCore(), nil)
+}
+
+// UpdateZhdataCore downloads the newest release, verifies and installs it, then
+// restarts the managed units onto it. Synchronous on purpose: one spinner in the
+// UI, and the zip is a few megabytes.
+func (a *ApiService) UpdateZhdataCore(c *gin.Context) {
+	result, err := service.UpdateZhdataCore()
+	if err != nil {
+		jsonMsg(c, "更新 zhdata 核心失败", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
 func (a *ApiService) GetSessions(c *gin.Context) {
 	resource := c.Query("resource")
 	if resource == "" {
