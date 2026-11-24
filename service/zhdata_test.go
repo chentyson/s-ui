@@ -128,6 +128,13 @@ func TestAddUsersZhdataShape(t *testing.T) {
 // the embedded core has no zhdata type, so before the external-type skip this
 // failed with an unknown inbound type error.
 func TestZhdataInboundSaveSkipsEmbeddedCore(t *testing.T) {
+	// This starts a real box, and sing-box's route.NetworkManager carries a
+	// known upstream race (Start vs notifyInterfaceUpdate — the same reason the
+	// race step of test.yml is scoped). -short skips it there; it still runs in
+	// the full go test pass, which is where its skip-AddInbound assertion lives.
+	if testing.Short() {
+		t.Skip("starts the embedded core: races under -race (upstream route.NetworkManager)")
+	}
 	db := zhdataTestDB(t)
 
 	prev := corePtr
@@ -168,6 +175,10 @@ func TestZhdataInboundSaveSkipsEmbeddedCore(t *testing.T) {
 // Deleting a zhdata inbound likewise must not reach RemoveInbound of the
 // embedded core.
 func TestZhdataInboundDeleteSkipsEmbeddedCore(t *testing.T) {
+	// Same upstream route.NetworkManager race as TestZhdataInboundSaveSkipsEmbeddedCore.
+	if testing.Short() {
+		t.Skip("starts the embedded core: races under -race (upstream route.NetworkManager)")
+	}
 	db := zhdataTestDB(t)
 
 	prev := corePtr
