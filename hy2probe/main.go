@@ -4,12 +4,16 @@
 // 它走的就是 hysteria2 入站 NewConnectionEx（TCP 流）这条路，和真实客户端一致。
 //
 // 用法（在控制机、s-ui 仓库树内编译：go build -o /tmp/hy2probe ./hy2probe）：
-//   /tmp/hy2probe <server_host:port> <sni> <password> <dest_host:port> <path> <秒数>
+//
+//	/tmp/hy2probe <server_host:port> <sni> <password> <dest_host:port> <path> <秒数>
+//
 // 例：
-//   /tmp/hy2probe 107.173.159.175:9443 h28.boosoo.cn <pw> speed.cloudflare.com:80 /__down?bytes=500000000 12
+//
+//	/tmp/hy2probe 107.173.159.175:9443 h28.boosoo.cn <pw> speed.cloudflare.com:80 /__down?bytes=500000000 12
 //
 // 判读：结果 ≈ group 设定的带宽（如 1.5M ≈ 1.5-1.9 Mbps）→ 限速生效；
-//       结果跑到链路上限（远高于设定值）→ 限速没生效。
+//
+//	结果跑到链路上限（远高于设定值）→ 限速没生效。
 package main
 
 import (

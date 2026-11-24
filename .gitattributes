@@ -1,0 +1,7 @@
+# Go 源码必须始终以 LF 入库与检出：Windows 上 core.autocrlf=true 会把 .go
+# 检出成 CRLF，本地 gofmt -l 因此满屏误报，真实未格式化的文件被淹没，
+# CI 的格式门禁（test.yml → Check formatting）也屡报屡漏（见 ZY11 出包）。
+*.go text eol=lf
+*.sh text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
