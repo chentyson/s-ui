@@ -7,8 +7,8 @@ import (
 
 	"github.com/alireza0/s-ui/core/bwlimit"
 	"github.com/alireza0/s-ui/core/devlimit"
-	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/alireza0/s-ui/core/usersession"
+	E "github.com/sagernet/sing/common/exceptions"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"

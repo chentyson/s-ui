@@ -21,11 +21,11 @@ import (
 	"strconv"
 	"time"
 
+	qtls "github.com/sagernet/sing-quic"
+	"github.com/sagernet/sing-quic/hysteria2"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	aTLS "github.com/sagernet/sing/common/tls"
-	qtls "github.com/sagernet/sing-quic"
-	"github.com/sagernet/sing-quic/hysteria2"
 )
 
 // ---- 最小 std tls 适配（sing 的 aTLS.Config 是接口，sing-box 里的实现太重） ----

@@ -319,5 +319,3 @@ func (h *Inbound) Close() error {
 		common.PtrOrNil(h.service),
 	)
 }
-
-

@@ -52,13 +52,13 @@ const zhdataAdminTimeout = 5 * time.Second
 // They mirror the zhdata server config names so the same row can one day
 // generate `-c config.json`.
 type zhdataOptions struct {
-	Tag         string   `json:"tag"`
-	Listen      string   `json:"listen"`
-	Backend     string   `json:"backend"`
-	MaxSessions int      `json:"max_sessions"`
-	Decoy       string   `json:"decoy"`
-	AdminAddr   string   `json:"admin_addr"`
-	AdminToken  string   `json:"admin_token"`
+	Tag         string `json:"tag"`
+	Listen      string `json:"listen"`
+	Backend     string `json:"backend"`
+	MaxSessions int    `json:"max_sessions"`
+	Decoy       string `json:"decoy"`
+	AdminAddr   string `json:"admin_addr"`
+	AdminToken  string `json:"admin_token"`
 	// ListenPorts is the expanded port pool the frontend writes (contract §2).
 	// It is float64 because that is what encoding/json decodes JSON numbers
 	// into, and util.BuildZhdataListen takes exactly that shape -- the same
@@ -110,7 +110,7 @@ func zhdataAdminRequest(opts *zhdataOptions, method string, path string, body an
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if opts.AdminToken != "" {
-		req.Header.Set("Authorization", "Bearer " + opts.AdminToken)
+		req.Header.Set("Authorization", "Bearer "+opts.AdminToken)
 	}
 	client := &http.Client{Timeout: zhdataAdminTimeout}
 	resp, err := client.Do(req)
@@ -175,11 +175,11 @@ func zhdataEnabledUsers(db *gorm.DB) ([]zhdataAdminUsers, error) {
 	// "group" is a keyword, hence the quoting; the alias keeps the scan name
 	// unambiguous.
 	const groupCol = `COALESCE(clients."group", '') AS client_group`
-	err := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, COALESCE(clients.devs, 0) AS max_devices, "+groupCol+", "+account+" "+base).Scan(&rows).Error
+	err := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, COALESCE(clients.devs, 0) AS max_devices, " + groupCol + ", " + account + " " + base).Scan(&rows).Error
 	if err != nil {
 		// A database that predates the devs column still has usable users.
 		rows = nil
-		if err2 := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, 0 AS max_devices, "+groupCol+" "+base).Scan(&rows).Error; err2 != nil {
+		if err2 := db.Raw("SELECT json_extract(clients.config, '$.zhdata.uuid') AS uuid, 0 AS max_devices, " + groupCol + " " + base).Scan(&rows).Error; err2 != nil {
 			return nil, err
 		}
 	}
@@ -674,7 +674,7 @@ type zhdataSnapshotEntry struct {
 // keeps two zhdata processes separate, and mapping uuid -> counters within a
 // tag is the P0 dedup for a uuid reported twice by one process.
 var (
-	zhdataStatsMu sync.Mutex
+	zhdataStatsMu   sync.Mutex
 	zhdataSnapshots = map[string]map[string]zhdataSnapshotEntry{}
 )
 

@@ -7,10 +7,10 @@ import (
 
 // Rejection records a single device-limit rejection event.
 type Rejection struct {
-	User    string    `json:"user"`
-	Source  string    `json:"source"`
-	Limit   int       `json:"limit"`
-	At      time.Time `json:"at"`
+	User   string    `json:"user"`
+	Source string    `json:"source"`
+	Limit  int       `json:"limit"`
+	At     time.Time `json:"at"`
 }
 
 const maxRejections = 200

@@ -554,7 +554,8 @@ func zhdataLink(
 func trojanLink(
 	userConfig map[string]interface{},
 	inbound map[string]interface{},
-	addrs []map[string]interface{}) []string {	password, _ := userConfig["password"].(string)
+	addrs []map[string]interface{}) []string {
+	password, _ := userConfig["password"].(string)
 	baseParams := getTransportParams(inbound["transport"])
 	var links []string
 

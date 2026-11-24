@@ -16,12 +16,12 @@ import (
 )
 
 type onlines struct {
-	User           []string         `json:"user"`
-	UserCounts     map[string]int   `json:"userCounts"`
-	InboundCounts  map[string]int   `json:"inboundCounts"`
-	RejectionUsers []string         `json:"rejectionUsers"`
-	Inbound        []string         `json:"inbound"`
-	Outbound       []string         `json:"outbound"`
+	User           []string       `json:"user"`
+	UserCounts     map[string]int `json:"userCounts"`
+	InboundCounts  map[string]int `json:"inboundCounts"`
+	RejectionUsers []string       `json:"rejectionUsers"`
+	Inbound        []string       `json:"inbound"`
+	Outbound       []string       `json:"outbound"`
 }
 
 var (
