@@ -59,6 +59,12 @@ type zhdataOptions struct {
 	Decoy       string   `json:"decoy"`
 	AdminAddr   string   `json:"admin_addr"`
 	AdminToken  string   `json:"admin_token"`
+	// ListenPorts is the expanded port pool the frontend writes (contract §2).
+	// It is float64 because that is what encoding/json decodes JSON numbers
+	// into, and util.BuildZhdataListen takes exactly that shape -- the same
+	// helper that builds the port a client link carries, so the launch ports
+	// and the link ports cannot drift apart (service/zhdata_unit.go).
+	ListenPorts []float64 `json:"listen_ports"`
 	// Upstream turns this zhdata inbound into a transparent relay: a
 	// comma-list free array of host:port zhdata upstreams (contract §6).
 	// Empty/absent = ordinary direct backend.
@@ -589,6 +595,12 @@ func zhdataWarnings(h *ZhdataHealth) []ZhdataWarning {
 	}
 	if h.Reachable && h.PanelUsers > 0 && h.CoreKeys > 0 && h.CoreKeys < h.PanelUsers {
 		w = append(w, ZhdataWarning{Code: "key_mismatch", Detail: "核心 key 数 " + strconv.Itoa(h.CoreKeys) + " 少于面板 " + strconv.Itoa(h.PanelUsers) + "（推送失败或用户库缺少该用户）"})
+	}
+	// The chip only proves admin_addr answers; a mismatch between the inbound's
+	// port pool and what the process actually binds is invisible there, so the
+	// unit sync reports its problems through this same list (service/zhdata_unit.go).
+	if unit := zhdataUnitWarning(h.Tag); unit != "" {
+		w = append(w, ZhdataWarning{Code: "unit", Detail: unit})
 	}
 	if len(w) == 0 {
 		return nil

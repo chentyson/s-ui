@@ -48,7 +48,13 @@ const (
 //	ZY9  PUT /v1/users 附带 up_kbps/down_kbps（zhdata >= 0.15.6）：client.group 的
 //	     带宽限速不再只作用于 sing-box 入站，zhdata 隧道进程与 relay 也按同一组
 //	     2M/500K 限速（此前核心没有按用户限速，面板填的组对 zhdata 完全无效）
-const VersionSuffix = "ZY9"
+//	ZY10 面板托管 zhdata 进程的启动参数（service/zhdata_unit.go）：保存 zhdata 入站时
+//	     按 listen_ports/backend/decoy/max_sessions 渲染 /etc/systemd/system/zhdata.service，
+//	     缺失就创建并 enable，ExecStart 变了就 daemon-reload + restart（参数没变不动进程），
+//	     并在启动前跑核心 `-init-view` 建用户视图；发现 drop-in 里有 ExecStart 覆盖、
+//	     二进制缺失、admin_addr 上已有别人的进程等情况只在入站卡片上告警，不再静默
+//	     （C455 现场：界面把端口改成 45501-45564，进程还听 49888-49919，客户端连不上）
+const VersionSuffix = "ZY10"
 
 // GetVersion 返回面板版本号：官方基线 + 自研后缀。
 // -v、启动日志、面板仪表盘（appVersion）都用它。

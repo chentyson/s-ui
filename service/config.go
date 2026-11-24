@@ -492,6 +492,13 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		if obj == "clients" || obj == "inbounds" {
 			PushZhdataUsers(database.GetDB())
 			PushZhdataRelay(database.GetDB())
+			// Port pool, backend, decoy and session caps are launch arguments of
+			// a process the panel does not embed, so saving an inbound has to
+			// align the unit too -- otherwise the UI says 45501-45564 while the
+			// process still binds 49888-49919 and clients cannot connect
+			// (service/zhdata_unit.go). Runs after the push so a restarted
+			// process picks the users up from the view immediately.
+			SyncZhdataService(database.GetDB())
 		}
 		// A client's bandwidth cap lives in its group and is read per
 		// connection, so a save that touched one has to push a fresh table.
