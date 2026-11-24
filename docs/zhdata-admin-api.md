@@ -94,16 +94,35 @@ JSON 端点（全部 `Content-Type: application/json`）：
 - 离开集合自动 kick：面板对比前后两次推送的 uuid 集，对被删除/禁用/换凭据的客户自动 `POST /v1/users/kick`（核心只对**新**连接做 key miss，不断已有隧道）。首次推送（面板刚启动）不踢任何人；入站删除时清掉该 tag 的前后快照。
 - **组即限速也要推到 zhdata**（**s-ui v1.6.3-ZY9+ / zhdata ≥0.15.6**）：`clients."group"` 读出的带宽（`bwlimit.Group`，与 hy2/vless/trojan 入站同一个函数）作为 `up_kbps`/`down_kbps` 随同推送。此前 ZY2 的限速只挂在 sing-box 入站的 `bwlimit.Wrap` 上，zhdata 隧道由独立进程（`zhdata.service`/`zhdata-relay.service`）终结，面板填的组对 zhdata 用户完全无效（客户测速不降）。推送点与触发时机不变（保存客户/入站、enable/disable、resetTraffic 都推），所以改组名/改限速当场生效，无需重启核心。relay 与终点进程都会收到同一份表：串联的令牌桶**不叠加**，稳态速率仍是那个值。旧核心忽略这两个字段（不影响其它字段），旧面板不带 ⇒ 该用户不限速。
 
-### 2.4 新节点部署（面板不拉起核心进程）
+### 2.4 新节点部署（**v1.6.3-ZY10 起面板负责 unit**）
 
-`service/` 里没有任何 `exec.Command`：面板对 zhdata 只做**记账（入站行）+ admin 推送 + 健康探测**，zhdata 进程本身由运维安装（systemd）。所以每个节点的顺序是：
+ZY10 之前 `service/` 里没有任何 `exec.Command`：面板只做记账 + admin 推送 + 健康探测，进程由运维装 systemd。
+代价在 C455 现形：界面上把入站端口改成 45501-45564 之后，`zhdata.service` 的 `-listen` 还停在 49888-49919，
+455xx 上根本没有 TCP 监听 ⇒ 客户端「无法连接」而入站卡片还是绿的。
 
-1. 面板升到 ZY9 → 备份 `db/s-ui.db*` → 换 `sui` → **`./sui migrate`**（ZY5 的 1.6.4 给存量客户补 `config.zhdata.uuid`，没这一步视图里是 0 行）→ 起服务。
-2. 装核心：`install -m 755 zhdata-linux-amd64 /opt/zhdata/zhdata-tunnel-linux-amd64`，然后 **`zhdata -init-view /usr/local/s-ui/db/s-ui.db`**（zhdata ≥**0.15.7**）。这一步建 `zhdata_users` 视图，让 `-users <面板 db>` 能读到客户；CentOS 7 自带的 sqlite3（3.7 级）**没有 JSON1**，用它自己的 `sqlite3` 建不出这个视图，所以语句放在核心里（见核心接口文档 §3.5.1）。
-3. 写 unit（`-mode server -listen :49888.. -admin 127.0.0.1:6070 -users /usr/local/s-ui/db/s-ui.db -backend direct -max-sessions N`，小内存机器把 N 收到 1200 一档）→ `systemctl enable --now`。
-4. 面板里建 zhdata 入站，`listen_ports` 与 `-listen` 一致、`admin_addr` 对上；卡片应显示 `core <版本> · N users pushed`，`GET /v1/stats` 里 `up_kbps/down_kbps` 应回显组限速。
+**ZY10（`service/zhdata_unit.go`）**：面板按入站参数生成 `/etc/systemd/system/zhdata.service`：
 
-2026-11-24 的 X22（CentOS 7，ZY4→ZY9）就是按这四步做的，实测组限速生效（1.5M 组 191 KB/s、10M 组 1.40 MB/s）。
+- 只托管**一个** unit：`admin_addr` 等于 `127.0.0.1:6070` 的那个 zhdata 入站（其余 admin 端口的进程仍归运维，例如 C498 的 `zhdata-relay.service`/6071）。入站没有 `admin_addr` ⇒ 面板不管任何 unit。
+- `-listen` 用 `util.BuildZhdataListen`（与生成客户链接同一个函数）⇒ 端口池与进程监听不可能再漂移；`listen_ports` 为空 ⇒ 不带 `-listen`（核心按默认端口起）。
+- 文本一致 ⇒ 不动（不 `daemon-reload`、不 `restart`）；`ExecStart` 变了 ⇒ 写文件（0644）+ `daemon-reload` + `zhdata -init-view` + `restart`（新建时还 `enable`）。
+- 二进制缺失 / 非 linux / 没有 systemctl / unit 上有 drop-in 覆盖 `ExecStart` / admin 端口已被别的进程占住 ⇒ 全部变成入站卡片上的 warning（`zhdataWarnings` 里 code=`unit`），不静默改写。
+- 触发点 = `ConfigService.Save` 的收尾（保存入站/客户之后），与 60s 用户推送同一路径；面板启动时不主动 restart（渲染结果与磁盘一致就不会动）。
+
+四步部署（ZY10 版）：
+
+1. 面板升到 ZY10 → 备份 `db/s-ui.db*` → 换 `sui` → **`./sui migrate`**（ZY5 的 1.6.4 给存量客户补 `config.zhdata.uuid`，没这一步视图里是 0 行）→ 起服务。
+2. 装核心：`install -m 755 zhdata-linux-amd64 /opt/zhdata/zhdata-tunnel-linux-amd64`（面板就找这个路径）。核心 ≥**0.15.7** 自带 `-init-view`（建 `zhdata_users` 视图；CentOS 7 的 sqlite3 没有 JSON1，语句放进核心，见核心接口文档 §3.5.1）；ZY10 在每次要 restart 前会自己跑一次 `-init-view`。
+3. 面板里建 zhdata 入站：`listen_ports` 写端口池、`admin_addr` 填 `127.0.0.1:6070`、`backend`/`max_sessions`/`decoy` 按需 ⇒ 保存后面板生成 unit 并 `enable --now`，日志出现 `zhdata unit: 已创建并启动 zhdata.service（入站 <tag>）`。
+4. 核验：卡片 chip 显示 `core <版本> · N users pushed`；`systemctl cat zhdata.service` 的 `-listen` 与入站端口池一致；`GET /v1/stats` 回显 `up_kbps/down_kbps`。
+
+改端口池/改 `max_sessions`/改 `backend` ⇒ 在界面上保存一次入站即可，面板会重写并重启核心进程（隧道断几秒）；**重启后有个 ≤60s 的「不限速窗口」**（视图不带速率，速率靠下一次 `PUT /v1/users`），测限速前先等核心日志出现 `admin API users replaced: … bandwidth-limited`。
+
+两个直接写 DB 的坑（都踩过）：
+
+- `GET api/inbounds`（不带 `id`）是**摘要**（`id/type/tag/tls_id/listen/listen_port`），整行回灌 `POST api/save` 会把 zhdata 的 `listen_ports/backend/admin_addr/max_sessions` 清光。编辑必须走 `GET api/inbounds?id=<id>`（`MarshalFull`，带全字段），与 UI 一致。
+- 直接写 `inbounds.options` 要写 **bytes**（blob）。写成 TEXT 会让面板每次列入站都报 `sql: Scan error … unsupported Scan`，zhdata 推送与统计全停。
+
+独立核心 vs 内嵌进面板的取舍见 `docs/zhdata-embedded-vs-standalone.md`。
 
 ### 2.5 健康可见性（面板 UI 能看到核心异常）
 
