@@ -55,7 +55,7 @@ require (
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
-	github.com/chentyson/zhdata v0.0.0
+	github.com/chentyson/zhdata v0.15.8
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6 // indirect
@@ -236,5 +236,3 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
-
-replace github.com/chentyson/zhdata => ../v2rayn/zhdata-src
